@@ -9,9 +9,10 @@
     "prisma:migrate": "prisma migrate dev"
   },
   "dependencies": {
+    "@deepgram/sdk": "^3.3.0",
     "@hubspot/api-client": "^11.1.0",
     "@prisma/client": "^5.14.0",
-    "@deepgram/sdk": "^3.3.0",
+    "@prisma/engines": "^5.22.0",
     "axios": "^1.7.2",
     "bcryptjs": "^2.4.3",
     "bull": "^4.12.9",
