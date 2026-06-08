@@ -1,0 +1,338 @@
+// vocallm/prisma/schema.prisma
+// Full multi-tenant schema for the VoCallM white-label AI calling platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// TENANT (each of your clients is one tenant)
+// ─────────────────────────────────────────────
+model Tenant {
+  id              String    @id @default(cuid())
+  name            String                          // "Acme Plumbing"
+  slug            String    @unique               // "acme-plumbing" — used in subdomain
+  domain          String?   @unique               // "calls.acmeplumbing.com" — custom domain
+  logoUrl         String?                         // uploaded logo for white-label portal
+  primaryColor    String    @default("#1a2b4a")   // hex — portal brand colour
+  
+  // Contact
+  ownerName       String
+  ownerEmail      String    @unique
+  ownerPhone      String?
+
+  // Billing
+  ratePerMinute   Float     @default(0.30)        // what YOU charge this client per minute
+  billingEmail    String?
+  totalMinutes    Float     @default(0)           // running total billed minutes
+  
+  // Status
+  status          TenantStatus @default(ACTIVE)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Calendar / CRM integration (optional per client)
+  calcomApiKey        String?   // if they connect their own Cal.com
+  calcomEventTypeId   String?
+  hubspotAccessToken  String?   // if they connect their own HubSpot
+  googleCalendarToken String?   // if they connect Google Calendar
+
+  // Relations
+  phoneNumbers    TenantPhone[]
+  campaigns       Campaign[]
+  leads           Lead[]
+  calls           Call[]
+  scripts         Script[]
+  users           TenantUser[]
+}
+
+enum TenantStatus {
+  ACTIVE
+  PAUSED
+  SUSPENDED
+}
+
+// ─────────────────────────────────────────────
+// TENANT PHONE NUMBERS
+// Each client can have multiple numbers (US, CA, UAE etc)
+// ─────────────────────────────────────────────
+model TenantPhone {
+  id            String    @id @default(cuid())
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id])
+  
+  number        String    @unique   // E.164 format: +12125550100
+  friendlyName  String              // "US - New York (212)"
+  country       String              // "US" | "CA" | "UAE"
+  twilioSid     String?             // Twilio phone number SID
+  vapiNumberId  String?             // Vapi phone number ID
+  
+  isDefault     Boolean   @default(false)
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+
+  calls         Call[]
+}
+
+// ─────────────────────────────────────────────
+// TENANT USERS (who can log into the client portal)
+// ─────────────────────────────────────────────
+model TenantUser {
+  id            String    @id @default(cuid())
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id])
+  
+  email         String
+  passwordHash  String
+  name          String
+  role          TenantUserRole @default(VIEWER)
+  
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@unique([tenantId, email])
+}
+
+enum TenantUserRole {
+  OWNER     // can upload leads, edit scripts, view billing
+  VIEWER    // read-only — sees reports only
+}
+
+// ─────────────────────────────────────────────
+// SUPER ADMIN USERS (Wayne Solutions team)
+// ─────────────────────────────────────────────
+model AdminUser {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String
+  name          String
+  createdAt     DateTime  @default(now())
+}
+
+// ─────────────────────────────────────────────
+// SCRIPT
+// Client writes this in plain English — your system
+// wraps it in the full system prompt automatically
+// ─────────────────────────────────────────────
+model Script {
+  id            String        @id @default(cuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id])
+  
+  name          String                    // "Q4 2026 Campaign Script"
+  
+  // What the client writes
+  companyInfo   String        @db.Text    // "We are a plumbing company in Toronto..."
+  servicesInfo  String        @db.Text    // "We offer emergency repairs, pipe installation..."
+  goalText      String        @db.Text    // "Book a free quote appointment"
+  objections    String?       @db.Text    // "If they say they have a provider, say..."
+  faqDocument   String?       @db.Text    // uploaded FAQ doc content (parsed from PDF/txt)
+  faqFileUrl    String?                   // original uploaded file URL
+  
+  // Voice config
+  voiceId       String        @default("21m00Tcm4TlvDq8ikWAM")  // ElevenLabs voice ID
+  agentName     String        @default("Alex")                    // name the caller uses
+  
+  // Approval workflow
+  status        ScriptStatus  @default(PENDING_REVIEW)
+  reviewNote    String?       // admin note when rejecting
+  reviewedBy    String?       // admin user id
+  reviewedAt    DateTime?
+  
+  // Compiled system prompt (generated by your system, never shown to client)
+  compiledPrompt String?      @db.Text
+  
+  isActive      Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  campaigns     Campaign[]
+}
+
+enum ScriptStatus {
+  PENDING_REVIEW    // client submitted, waiting for your approval
+  APPROVED          // you approved it, ready to use
+  REJECTED          // you rejected it with a note
+  LIVE              // currently being used in an active campaign
+}
+
+// ─────────────────────────────────────────────
+// CAMPAIGN
+// A campaign = a script + a set of leads + calling rules
+// ─────────────────────────────────────────────
+model Campaign {
+  id              String          @id @default(cuid())
+  tenantId        String
+  tenant          Tenant          @relation(fields: [tenantId], references: [id])
+  scriptId        String
+  script          Script          @relation(fields: [scriptId], references: [id])
+  
+  name            String          // "Toronto leads Oct 2026"
+  
+  // Calling schedule
+  callFromHour    Int             @default(9)   // 9 = 9am in client's timezone
+  callToHour      Int             @default(17)  // 17 = 5pm
+  timezone        String          @default("America/Toronto")
+  callDays        String          @default("MON,TUE,WED,THU,FRI")  // comma-separated
+  maxAttempts     Int             @default(3)   // max retries per lead
+  retryAfterHours Int             @default(24)  // wait before retry
+  
+  status          CampaignStatus  @default(DRAFT)
+  startedAt       DateTime?
+  pausedAt        DateTime?
+  completedAt     DateTime?
+  
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  leads           Lead[]
+  calls           Call[]
+}
+
+enum CampaignStatus {
+  DRAFT       // created but not started
+  ACTIVE      // currently dialling
+  PAUSED      // manually paused
+  COMPLETED   // all leads exhausted
+}
+
+// ─────────────────────────────────────────────
+// LEAD
+// Individual person to be called
+// ─────────────────────────────────────────────
+model Lead {
+  id              String      @id @default(cuid())
+  tenantId        String
+  tenant          Tenant      @relation(fields: [tenantId], references: [id])
+  campaignId      String?
+  campaign        Campaign?   @relation(fields: [campaignId], references: [id])
+  
+  // Contact info
+  name            String
+  phone           String                // E.164 format
+  email           String?
+  company         String?
+  title           String?               // "CTO", "IT Manager" etc
+  country         String    @default("US")  // "US" | "CA" | "UAE"
+  
+  // DNC
+  isOptedOut      Boolean   @default(false)
+  optedOutAt      DateTime?
+  
+  // Call tracking
+  status          LeadStatus  @default(PENDING)
+  callAttempts    Int         @default(0)
+  lastCalledAt    DateTime?
+  callbackAt      DateTime?             // scheduled callback time
+  
+  // Outcome
+  meetingBookedAt DateTime?
+  meetingLink     String?
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  calls           Call[]
+}
+
+enum LeadStatus {
+  PENDING           // not yet called
+  CALLING           // currently on a call
+  BOOKED            // meeting booked — success
+  NOT_INTERESTED    // said no
+  CALLBACK          // asked to call back later
+  VOICEMAIL         // left voicemail
+  NO_ANSWER         // rang out, no answer
+  WRONG_NUMBER      // not the right person/number
+  OPTED_OUT         // asked not to be called
+  EXHAUSTED         // max attempts reached
+}
+
+// ─────────────────────────────────────────────
+// CALL
+// Every call attempt is one record
+// ─────────────────────────────────────────────
+model Call {
+  id              String      @id @default(cuid())
+  tenantId        String
+  tenant          Tenant      @relation(fields: [tenantId], references: [id])
+  leadId          String
+  lead            Lead        @relation(fields: [leadId], references: [id])
+  campaignId      String?
+  campaign        Campaign?   @relation(fields: [campaignId], references: [id])
+  phoneNumberId   String?
+  phoneNumber     TenantPhone? @relation(fields: [phoneNumberId], references: [id])
+  
+  // Provider IDs
+  twilioCallSid   String?     @unique
+  vapiCallId      String?     @unique
+  
+  // Call data
+  direction       String      @default("outbound")
+  durationSeconds Int?
+  status          CallStatus  @default(INITIATED)
+  outcome         CallOutcome?
+  
+  // Content
+  transcript      String?     @db.Text    // full conversation text
+  summary         String?     @db.Text    // AI-generated 1-paragraph summary
+  recordingUrl    String?
+  
+  // Meeting booked during this call
+  meetingBookedAt DateTime?
+  meetingLink     String?
+  calEventId      String?
+  
+  // Billing
+  billedMinutes   Float?      // rounded up to nearest 0.1 min
+  billedAmount    Float?      // billedMinutes * tenant.ratePerMinute
+  
+  startedAt       DateTime?
+  endedAt         DateTime?
+  createdAt       DateTime    @default(now())
+}
+
+enum CallStatus {
+  INITIATED     // call triggered
+  RINGING       // dialling
+  IN_PROGRESS   // prospect answered
+  COMPLETED     // call ended normally
+  NO_ANSWER     // rang out
+  FAILED        // technical failure
+  VOICEMAIL     // went to voicemail
+}
+
+enum CallOutcome {
+  BOOKED
+  NOT_INTERESTED
+  CALLBACK
+  VOICEMAIL
+  NO_ANSWER
+  WRONG_NUMBER
+  OPTED_OUT
+  ERROR
+}
+
+// ─────────────────────────────────────────────
+// USAGE LOG
+// Append-only log of every billed minute block
+// ─────────────────────────────────────────────
+model UsageLog {
+  id            String    @id @default(cuid())
+  tenantId      String
+  callId        String
+  
+  minutes       Float
+  ratePerMinute Float
+  amount        Float
+  
+  createdAt     DateTime  @default(now())
+
+  @@index([tenantId])
+  @@index([createdAt])
+}
