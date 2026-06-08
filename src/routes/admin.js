@@ -207,13 +207,11 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
       where: { id: req.params.id },
       data: {
         status: 'APPROVED',
-        compiledPrompt,
+        compiledPrompt: JSON.stringify({ vapiAssistantId, prompt: compiledPrompt }),
         reviewedBy: req.user.id,
         reviewedAt: new Date(),
         reviewNote: null,
-        isActive: true,
-        // Store Vapi assistant ID in compiledPrompt metadata
-        compiledPrompt: JSON.stringify({ vapiAssistantId, prompt: compiledPrompt })
+        isActive: true
       }
     })
     res.json(updated)

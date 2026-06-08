@@ -57,8 +57,16 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3001
 httpServer.listen(PORT, () => {
   console.log(`VoCallM backend running on port ${PORT}`)
-  // Start the dial queue worker
   require('./workers/dialQueue').startWorker()
+})
+
+httpServer.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Kill the existing process and retry.`)
+    process.exit(1)
+  } else {
+    throw err
+  }
 })
 
 module.exports = { app, httpServer }
