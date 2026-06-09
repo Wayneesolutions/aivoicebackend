@@ -9,6 +9,9 @@ const { createServer } = require('http')
 const app = express()
 const httpServer = createServer(app)
 
+// ── Static: uploaded files (logos, docs) ───────────────
+app.use('/uploads', express.static(require('path').join(__dirname, '../uploads')))
+
 // ── Middleware ──────────────────────────────────────────
 app.use(helmet())
 app.use(cors({

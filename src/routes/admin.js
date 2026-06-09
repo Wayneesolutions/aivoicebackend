@@ -2,10 +2,34 @@
 // All routes here require super admin auth (Wayne Solutions team only)
 const router = require('express').Router()
 const bcrypt = require('bcryptjs')
+const path = require('path')
+const fs = require('fs')
+const multer = require('multer')
 const { PrismaClient } = require('@prisma/client')
 const { requireAdmin } = require('../middleware/auth')
 const vapiService = require('../services/vapi')
 const prisma = new PrismaClient()
+
+// ── Multer: logo uploads ───────────────────────────────────
+const logoStorage = multer.diskStorage({
+  destination(req, file, cb) {
+    const dir = path.join(__dirname, '../../uploads/logos')
+    fs.mkdirSync(dir, { recursive: true })
+    cb(null, dir)
+  },
+  filename(req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase() || '.png'
+    cb(null, `${req.params.id}-${Date.now()}${ext}`)
+  }
+})
+const logoUpload = multer({
+  storage: logoStorage,
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter(req, file, cb) {
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image files are allowed'))
+    cb(null, true)
+  }
+})
 
 router.use(requireAdmin)
 
@@ -120,6 +144,19 @@ router.patch('/tenants/:id', async (req, res, next) => {
     allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k] })
 
     const tenant = await prisma.tenant.update({ where: { id: req.params.id }, data })
+    res.json(tenant)
+  } catch (err) { next(err) }
+})
+
+// POST /api/admin/tenants/:id/logo — upload/replace company logo
+router.post('/tenants/:id/logo', logoUpload.single('logo'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
+    const logoUrl = `/uploads/logos/${req.file.filename}`
+    const tenant = await prisma.tenant.update({
+      where: { id: req.params.id },
+      data: { logoUrl }
+    })
     res.json(tenant)
   } catch (err) { next(err) }
 })
