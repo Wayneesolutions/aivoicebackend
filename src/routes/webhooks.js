@@ -1,14 +1,31 @@
 // backend/src/routes/webhooks.js
 // Vapi sends every call event here — this is the brain of the post-call processing
 const router = require('express').Router()
+const crypto = require('crypto')
 const { PrismaClient } = require('@prisma/client')
 const calendarService = require('../services/calendar')
 const crmService      = require('../services/crm')
 const billingService  = require('../services/billing')
 const prisma = new PrismaClient()
 
+function verifyVapiSignature(rawBody, signatureHeader) {
+  const secret = process.env.VAPI_WEBHOOK_SECRET
+  if (!secret) return true // skip verification if secret not configured yet
+  if (!signatureHeader) return false
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody)
+    .digest('hex')
+  return crypto.timingSafeEqual(Buffer.from(signatureHeader), Buffer.from(expected))
+}
+
 // POST /api/webhooks/vapi
 router.post('/vapi', async (req, res) => {
+  const signature = req.headers['x-vapi-signature'] || req.headers['vapi-signature']
+  if (!verifyVapiSignature(req.body, signature)) {
+    return res.status(401).json({ error: 'Invalid webhook signature' })
+  }
+
   // Always respond 200 immediately — process async
   res.status(200).json({ received: true })
 

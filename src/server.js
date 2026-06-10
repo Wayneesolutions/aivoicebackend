@@ -6,6 +6,7 @@ const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 const { createServer } = require('http')
 
+const morgan = require('morgan')
 const app = express()
 const httpServer = createServer(app)
 
@@ -13,6 +14,7 @@ const httpServer = createServer(app)
 app.use('/uploads', express.static(require('path').join(__dirname, '../uploads')))
 
 // ── Middleware ──────────────────────────────────────────
+app.use(morgan('dev'))
 app.use(helmet())
 app.use(cors({
   origin: [

@@ -1,12 +1,42 @@
+// backend/src/workers/dialQueue.js
+// Bull-backed dial queue — replaces the fragile setInterval approach.
+// Jobs survive server restarts. Concurrency is enforced by Bull, not in-memory counters.
+const { Queue, Worker, QueueScheduler } = require('bullmq')
 const { PrismaClient } = require('@prisma/client')
-const vapiService = require('../services/vapi')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
+const vapiService = require('../services/vapi')
 
 const prisma = new PrismaClient()
 
+const REDIS_URL   = process.env.REDIS_URL || 'redis://localhost:6379'
 const MAX_CONCURRENT = 10
-let activeDials = 0
-const pausedTenants = new Set()
+
+// Parse Redis URL into connection config for BullMQ
+function redisConnection() {
+  try {
+    const url = new URL(REDIS_URL)
+    const conn = {
+      host:     url.hostname,
+      port:     parseInt(url.port) || 6379,
+      password: url.password || undefined,
+      tls:      url.protocol === 'rediss:' ? {} : undefined
+    }
+    return conn
+  } catch {
+    return { host: 'localhost', port: 6379 }
+  }
+}
+
+const connection = redisConnection()
+
+// Two queues:
+//   dial-scheduler  — a single repeatable job that scans campaigns every 5 min
+//   dial-calls      — one job per individual outbound call, concurrency = MAX_CONCURRENT
+const schedulerQueue = new Queue('dial-scheduler', { connection })
+const callQueue      = new Queue('dial-calls',     { connection })
+
+// ── SCHEDULER WORKER ─────────────────────────────────────────────────────────
+// Runs every 5 min, finds leads ready to be called, enqueues one dial-calls job per lead
 
 async function runScheduler(campaignId = null) {
   const now = new Date()
@@ -22,7 +52,13 @@ async function runScheduler(campaignId = null) {
   for (const campaign of activeCampaigns) {
     if (!campaign.script?.isActive) continue
     if (!isWithinCallingHours(campaign, now)) continue
-    if (pausedTenants.has(campaign.tenantId)) continue
+
+    let vapiAssistantId
+    try {
+      const meta = JSON.parse(campaign.script.compiledPrompt || '{}')
+      vapiAssistantId = meta.vapiAssistantId
+    } catch { continue }
+    if (!vapiAssistantId) continue
 
     const leads = await prisma.lead.findMany({
       where: {
@@ -45,26 +81,13 @@ async function runScheduler(campaignId = null) {
         continue
       }
 
-      let vapiAssistantId
-      try {
-        const meta = JSON.parse(campaign.script.compiledPrompt || '{}')
-        vapiAssistantId = meta.vapiAssistantId
-      } catch { continue }
-
-      if (!vapiAssistantId) continue
-
-      // Wait if at concurrency limit
-      while (activeDials >= MAX_CONCURRENT) {
-        await new Promise(r => setTimeout(r, 500))
-      }
-
-      // Mark lead before firing so the next loop iteration skips it
+      // Mark CALLING before enqueuing so the next scheduler tick skips it
       await prisma.lead.update({
         where: { id: lead.id },
         data: { status: 'CALLING' }
       })
 
-      dialLead({
+      await callQueue.add('dial', {
         leadId:          lead.id,
         campaignId:      campaign.id,
         tenantId:        campaign.tenantId,
@@ -74,52 +97,54 @@ async function runScheduler(campaignId = null) {
         vapiAssistantId,
         leadName:        lead.name,
         leadCompany:     lead.company || '',
-        leadTitle:       lead.title  || ''
-      }).catch(err => console.error('[dialQueue] Unhandled dial error:', err.message))
+        leadTitle:       lead.title   || ''
+      }, {
+        attempts: 2,                  // retry once on transient Vapi errors
+        backoff: { type: 'fixed', delay: 10000 }
+      })
     }
   }
 }
 
-async function dialLead({ leadId, campaignId, tenantId, toNumber, fromNumberId, fromNumber, vapiAssistantId, leadName, leadCompany, leadTitle }) {
-  activeDials++
-  try {
-    const parsed = parsePhoneNumberFromString(toNumber)
-    if (!parsed || !parsed.isValid()) {
-      await prisma.lead.update({ where: { id: leadId }, data: { status: 'WRONG_NUMBER' } })
-      return
-    }
+// ── CALL WORKER ──────────────────────────────────────────────────────────────
+// Processes one outbound call per job. concurrency = MAX_CONCURRENT means Bull
+// runs at most 10 of these in parallel across all server instances.
 
-    const callRecord = await prisma.call.create({
-      data: {
-        tenantId, leadId, campaignId,
-        phoneNumberId: fromNumberId,
-        status: 'INITIATED',
-        direction: 'outbound'
-      }
-    })
+async function dialLead(job) {
+  const { leadId, campaignId, tenantId, toNumber, fromNumberId, fromNumber, vapiAssistantId, leadName, leadCompany, leadTitle } = job.data
 
-    const vapiCall = await vapiService.startOutboundCall({
-      toNumber, fromNumber, vapiAssistantId,
-      metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
-    })
-
-    await prisma.call.update({
-      where: { id: callRecord.id },
-      data: { vapiCallId: vapiCall.id, status: 'RINGING', startedAt: new Date() }
-    })
-
-    await prisma.lead.update({
-      where: { id: leadId },
-      data: { callAttempts: { increment: 1 }, lastCalledAt: new Date() }
-    })
-
-  } catch (err) {
-    console.error(`[dialQueue] Call failed for lead ${leadId}:`, err.message)
-    await prisma.lead.update({ where: { id: leadId }, data: { status: 'PENDING' } })
-  } finally {
-    activeDials--
+  const parsed = parsePhoneNumberFromString(toNumber)
+  if (!parsed || !parsed.isValid()) {
+    await prisma.lead.update({ where: { id: leadId }, data: { status: 'WRONG_NUMBER' } })
+    return
   }
+
+  const callRecord = await prisma.call.create({
+    data: {
+      tenantId, leadId, campaignId,
+      phoneNumberId: fromNumberId,
+      status: 'INITIATED',
+      direction: 'outbound'
+    }
+  })
+
+  const vapiCall = await vapiService.startOutboundCall({
+    toNumber, fromNumber, vapiAssistantId,
+    metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
+  })
+
+  await prisma.call.update({
+    where: { id: callRecord.id },
+    data: { vapiCallId: vapiCall.id, status: 'RINGING', startedAt: new Date() }
+  })
+
+  await prisma.lead.update({
+    where: { id: leadId },
+    data: { callAttempts: { increment: 1 }, lastCalledAt: new Date() }
+  })
 }
+
+// ── HELPERS ──────────────────────────────────────────────────────────────────
 
 function isWithinCallingHours(campaign, now) {
   const inTz    = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
@@ -138,19 +163,51 @@ function pickNumberForLead(phoneNumbers, country) {
   )
 }
 
-function startWorker() {
-  setInterval(() => {
-    runScheduler().catch(err => console.error('[dialQueue] Scheduler error:', err.message))
-  }, 5 * 60 * 1000)
-  console.log('[dialQueue] Worker started — scheduling every 5 minutes')
+// ── STARTUP ──────────────────────────────────────────────────────────────────
+
+let schedulerWorker = null
+let callWorker = null
+
+async function startWorker() {
+  // Repeatable scheduler job — upserts so restarts don't duplicate it
+  await schedulerQueue.add(
+    'scan-campaigns',
+    {},
+    { repeat: { every: 5 * 60 * 1000 }, jobId: 'recurring-scan' }
+  )
+
+  schedulerWorker = new Worker('dial-scheduler', async () => {
+    await runScheduler()
+  }, { connection })
+
+  callWorker = new Worker('dial-calls', dialLead, {
+    connection,
+    concurrency: MAX_CONCURRENT
+  })
+
+  callWorker.on('failed', async (job, err) => {
+    console.error(`[dialQueue] Job ${job?.id} failed:`, err.message)
+    if (job?.data?.leadId) {
+      await prisma.lead.update({
+        where: { id: job.data.leadId },
+        data: { status: 'PENDING' }
+      }).catch(() => {})
+    }
+  })
+
+  console.log('[dialQueue] Bull workers started (scheduler every 5 min, concurrency', MAX_CONCURRENT, ')')
 }
 
+// Trigger a specific campaign immediately (called when client clicks Start Campaign)
 async function triggerCampaign(campaignId) {
-  await runScheduler(campaignId)
+  await schedulerQueue.add('scan-campaigns', { campaignId }, {
+    jobId: `trigger-${campaignId}-${Date.now()}`
+  })
 }
 
-function pauseTenant(tenantId) {
-  pausedTenants.add(tenantId)
+async function stopWorker() {
+  await schedulerWorker?.close()
+  await callWorker?.close()
 }
 
-module.exports = { startWorker, triggerCampaign, pauseTenant }
+module.exports = { startWorker, triggerCampaign, stopWorker }
