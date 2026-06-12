@@ -21,7 +21,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
 
 router.post('/', requireTenantOwner, async (req, res, next) => {
   try {
-    const { name, scriptId, callFromHour, callToHour, timezone, callDays, maxAttempts, retryAfterHours } = req.body
+    const { name, scriptId, callFromHour, callToHour, timezone, callDays, maxAttempts, retryAfterHours, includeAllLeads } = req.body
     if (!name || !scriptId) return res.status(400).json({ error: 'name and scriptId required' })
 
     const script = await prisma.script.findFirst({ where: { id: scriptId, tenantId: req.tenant.id } })
@@ -38,7 +38,29 @@ router.post('/', requireTenantOwner, async (req, res, next) => {
         maxAttempts: maxAttempts || 3, retryAfterHours: retryAfterHours || 24
       }
     })
+
+    // Assign all unassigned PENDING leads to this campaign
+    if (includeAllLeads) {
+      await prisma.lead.updateMany({
+        where: { tenantId: req.tenant.id, campaignId: null, status: 'PENDING', isOptedOut: false },
+        data: { campaignId: campaign.id }
+      })
+    }
+
     res.status(201).json(campaign)
+  } catch (err) { next(err) }
+})
+
+router.patch('/:id', requireTenantOwner, async (req, res, next) => {
+  try {
+    const allowed = ['name', 'callFromHour', 'callToHour', 'timezone', 'callDays', 'maxAttempts', 'retryAfterHours']
+    const data = {}
+    allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k] })
+    const campaign = await prisma.campaign.update({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      data
+    })
+    res.json(campaign)
   } catch (err) { next(err) }
 })
 

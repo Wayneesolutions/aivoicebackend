@@ -22,7 +22,7 @@ router.get('/history', requireTenantUser, async (req, res, next) => {
       orderBy: { createdAt: 'desc' },
       take: 100
     })
-    res.json(logs)
+    res.json(logs.map(l => ({ ...l, rate: l.ratePerMinute })))
   } catch (err) { next(err) }
 })
 

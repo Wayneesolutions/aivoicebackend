@@ -30,6 +30,16 @@ router.get('/', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// GET /api/leads/unassigned-count — leads not yet in any campaign
+router.get('/unassigned-count', requireTenantUser, async (req, res, next) => {
+  try {
+    const count = await prisma.lead.count({
+      where: { tenantId: req.tenant.id, campaignId: null, status: 'PENDING', isOptedOut: false }
+    })
+    res.json({ count })
+  } catch (err) { next(err) }
+})
+
 // POST /api/leads/upload — CSV upload
 router.post('/upload', requireTenantOwner, upload.single('file'), async (req, res, next) => {
   try {

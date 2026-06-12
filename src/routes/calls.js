@@ -21,7 +21,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
       }),
       prisma.call.count({ where })
     ])
-    res.json({ calls, total })
+    res.json({ calls: calls.map(mapCall), total })
   } catch (err) { next(err) }
 })
 
@@ -68,8 +68,17 @@ router.get('/:id', requireTenantUser, async (req, res, next) => {
       include: { lead: true, phoneNumber: true }
     })
     if (!call) return res.status(404).json({ error: 'Call not found' })
-    res.json(call)
+    res.json(mapCall(call))
   } catch (err) { next(err) }
 })
+
+// Map DB field names → frontend-expected names
+function mapCall(c) {
+  return {
+    ...c,
+    duration: c.durationSeconds,     // frontend uses 'duration'
+    meetingAt: c.meetingBookedAt      // frontend uses 'meetingAt'
+  }
+}
 
 module.exports = router

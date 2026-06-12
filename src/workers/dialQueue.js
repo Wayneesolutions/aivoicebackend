@@ -49,16 +49,29 @@ async function runScheduler(campaignId = null) {
     }
   })
 
+  console.log(`[dialQueue] Scanning ${activeCampaigns.length} active campaign(s)`)
+
   for (const campaign of activeCampaigns) {
-    if (!campaign.script?.isActive) continue
-    if (!isWithinCallingHours(campaign, now)) continue
+    if (!campaign.script?.isActive) {
+      console.log(`[dialQueue] Campaign "${campaign.name}" — script not active, skipping`)
+      continue
+    }
+    const withinHours = isWithinCallingHours(campaign, now)
+    if (!withinHours) {
+      const inTz = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
+      console.log(`[dialQueue] Campaign "${campaign.name}" — outside calling hours (${inTz.getHours()}:${String(inTz.getMinutes()).padStart(2,'0')} ${campaign.timezone}, window ${campaign.callFromHour}–${campaign.callToHour}), skipping`)
+      continue
+    }
 
     let vapiAssistantId
     try {
       const meta = JSON.parse(campaign.script.compiledPrompt || '{}')
       vapiAssistantId = meta.vapiAssistantId
     } catch { continue }
-    if (!vapiAssistantId) continue
+    if (!vapiAssistantId) {
+      console.log(`[dialQueue] Campaign "${campaign.name}" — no vapiAssistantId on script, skipping`)
+      continue
+    }
 
     const leads = await prisma.lead.findMany({
       where: {
@@ -74,10 +87,16 @@ async function runScheduler(campaignId = null) {
       take: 50
     })
 
+    console.log(`[dialQueue] Campaign "${campaign.name}" — ${leads.length} lead(s) eligible to dial`)
+
     for (const lead of leads) {
-      const fromNumber = pickNumberForLead(campaign.tenant.phoneNumbers, lead.country)
-      if (!fromNumber) {
+      const phoneRecord = pickNumberForLead(campaign.tenant.phoneNumbers, lead.country)
+      if (!phoneRecord) {
         console.warn(`[dialQueue] No number for country ${lead.country} — tenant ${campaign.tenantId}`)
+        continue
+      }
+      if (!phoneRecord.vapiNumberId) {
+        console.warn(`[dialQueue] Phone number ${phoneRecord.number} has no vapiNumberId — assign it in Admin → Phone Numbers`)
         continue
       }
 
@@ -92,8 +111,8 @@ async function runScheduler(campaignId = null) {
         campaignId:      campaign.id,
         tenantId:        campaign.tenantId,
         toNumber:        lead.phone,
-        fromNumberId:    fromNumber.id,
-        fromNumber:      fromNumber.number,
+        fromNumberId:    phoneRecord.id,
+        vapiNumberId:    phoneRecord.vapiNumberId,
         vapiAssistantId,
         leadName:        lead.name,
         leadCompany:     lead.company || '',
@@ -111,7 +130,7 @@ async function runScheduler(campaignId = null) {
 // runs at most 10 of these in parallel across all server instances.
 
 async function dialLead(job) {
-  const { leadId, campaignId, tenantId, toNumber, fromNumberId, fromNumber, vapiAssistantId, leadName, leadCompany, leadTitle } = job.data
+  const { leadId, campaignId, tenantId, toNumber, fromNumberId, vapiNumberId, vapiAssistantId, leadName, leadCompany, leadTitle } = job.data
 
   const parsed = parsePhoneNumberFromString(toNumber)
   if (!parsed || !parsed.isValid()) {
@@ -129,7 +148,7 @@ async function dialLead(job) {
   })
 
   const vapiCall = await vapiService.startOutboundCall({
-    toNumber, fromNumber, vapiAssistantId,
+    toNumber, vapiNumberId, vapiAssistantId,
     metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
   })
 

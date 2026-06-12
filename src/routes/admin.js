@@ -275,6 +275,19 @@ router.post('/scripts/:id/reject', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// GET /api/admin/scripts/reviewed
+router.get('/scripts/reviewed', async (req, res, next) => {
+  try {
+    const scripts = await prisma.script.findMany({
+      where: { status: { in: ['APPROVED', 'REJECTED'] } },
+      include: { tenant: { select: { id: true, name: true } } },
+      orderBy: { reviewedAt: 'desc' },
+      take: 50
+    })
+    res.json(scripts)
+  } catch (err) { next(err) }
+})
+
 // ── PLATFORM BILLING OVERVIEW ──────────────────────────
 
 // GET /api/admin/billing/summary

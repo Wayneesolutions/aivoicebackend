@@ -19,42 +19,48 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, existin
       model: 'gpt-4o-mini',
       systemPrompt,
       tools: getVapiFunctions(),
-      temperature: 0.7,
-      maxTokens: 200  // keep phone responses short
+      temperature: 0.8,
+      maxTokens: 250
     },
     voice: {
       provider: '11labs',
       voiceId: voiceId || process.env.ELEVENLABS_DEFAULT_VOICE_ID,
-      model: 'eleven_flash_v2_5',
+      model: 'eleven_turbo_v2_5',
       stability: 0.5,
       similarityBoost: 0.75,
       useSpeakerBoost: true,
-      optimize_streaming_latency: 4
+      optimizeStreamingLatency: 4
     },
     transcriber: {
       provider: 'deepgram',
-      model: 'nova-3',
+      model: 'nova-2',
       language: 'en-US',
       smartFormat: true,
       endpointing: 200
     },
-    firstMessage: `Hi, this is ${agentName}. Am I speaking with the right person?`,
-    endCallFunctionEnabled: true,
+    // {{prospect_name}} is injected per-call via assistantOverrides.variableValues
+    firstMessage: `Hi, may I speak with {{prospect_name}}? This is ${agentName} calling.`,
     recordingEnabled: true,
-    silenceTimeoutSeconds: 20,
-    maxDurationSeconds: 600,  // 10 min max per call
+    silenceTimeoutSeconds: 30,
+    maxDurationSeconds: 600,
     backgroundSound: 'office',
-    // Webhook — Vapi will POST call events here
     serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
   }
 
-  if (existingAssistantId) {
-    const res = await vapiClient.patch(`/assistant/${existingAssistantId}`, payload)
-    return res.data.id
-  } else {
-    const res = await vapiClient.post('/assistant', payload)
-    return res.data.id
+  try {
+    if (existingAssistantId) {
+      const res = await vapiClient.patch(`/assistant/${existingAssistantId}`, payload)
+      return res.data.id
+    } else {
+      const res = await vapiClient.post('/assistant', payload)
+      return res.data.id
+    }
+  } catch (err) {
+    if (err.response) {
+      console.error('[VAPI ERROR]', err.response.status, JSON.stringify(err.response.data, null, 2))
+    }
+    throw err
   }
 }
 
@@ -62,29 +68,39 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, existin
  * Trigger an outbound call via Vapi.
  * Returns the Vapi call object.
  */
-async function startOutboundCall({ toNumber, fromNumber, vapiAssistantId, metadata }) {
-  const res = await vapiClient.post('/call/phone', {
+async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata }) {
+  if (!vapiNumberId) throw new Error('vapiNumberId is required for outbound calls')
+
+  const payload = {
     assistantId: vapiAssistantId,
     customer: {
       number: toNumber,
       name: metadata?.leadName || ''
     },
-    phoneNumber: { number: fromNumber },
+    phoneNumberId: vapiNumberId,
     assistantOverrides: {
-      // Pass lead-specific context so the AI knows who it's calling
       variableValues: {
-        prospect_name: metadata?.leadName || '',
+        prospect_name:    metadata?.leadName    || '',
         prospect_company: metadata?.leadCompany || '',
-        prospect_title: metadata?.leadTitle || ''
+        prospect_title:   metadata?.leadTitle   || ''
       }
     },
     metadata: {
-      tenantId: metadata.tenantId,
-      leadId: metadata.leadId,
-      campaignId: metadata.campaignId
+      tenantId:      metadata.tenantId,
+      leadId:        metadata.leadId,
+      campaignId:    metadata.campaignId
     }
-  })
-  return res.data
+  }
+
+  try {
+    const res = await vapiClient.post('/call/phone', payload)
+    return res.data
+  } catch (err) {
+    if (err.response) {
+      console.error('[VAPI CALL ERROR]', err.response.status, JSON.stringify(err.response.data, null, 2))
+    }
+    throw err
+  }
 }
 
 /**

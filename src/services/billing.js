@@ -13,12 +13,21 @@ async function logUsage({ tenantId, callId, minutes, ratePerMinute, amount }) {
 }
 
 async function getUsageSummary(tenantId, startDate, endDate) {
-  const logs = await prisma.usageLog.findMany({
-    where: { tenantId, createdAt: { gte: startDate, lte: endDate } }
-  })
+  const [logs, tenant] = await Promise.all([
+    prisma.usageLog.findMany({
+      where: { tenantId, createdAt: { gte: startDate, lte: endDate } }
+    }),
+    prisma.tenant.findUnique({ where: { id: tenantId }, select: { ratePerMinute: true } })
+  ])
   const totalMinutes = logs.reduce((s, l) => s + l.minutes, 0)
   const totalAmount  = logs.reduce((s, l) => s + l.amount,  0)
-  return { totalMinutes, totalAmount, count: logs.length }
+  return {
+    ratePerMinute: tenant?.ratePerMinute ?? 0,
+    totalMinutes,
+    totalAmount,
+    count: logs.length,
+    period: { from: startDate.toISOString(), to: endDate.toISOString() }
+  }
 }
 
 module.exports = { logUsage, getUsageSummary }
