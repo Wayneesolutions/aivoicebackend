@@ -76,8 +76,9 @@ router.get('/:id', requireTenantUser, async (req, res, next) => {
 function mapCall(c) {
   return {
     ...c,
-    duration: c.durationSeconds,     // frontend uses 'duration'
-    meetingAt: c.meetingBookedAt      // frontend uses 'meetingAt'
+    duration:    c.durationSeconds,
+    meetingAt:   c.meetingBookedAt,
+    scheduledAt: c.scheduledMeetingAt   // actual scheduled meeting time
   }
 }
 

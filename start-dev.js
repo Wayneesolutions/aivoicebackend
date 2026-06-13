@@ -48,7 +48,7 @@ async function patchVapiAssistants(baseUrl) {
 }
 
 function startServer() {
-  const server = spawn('node', ['src/server.js'], { stdio: 'inherit', env: process.env })
+  const server = spawn('node', ['src/server.js'], { stdio: 'inherit', env: process.env, shell: true })
   server.on('exit', (code) => process.exit(code))
 }
 
@@ -56,7 +56,8 @@ async function main() {
   console.log('[start-dev] Starting Cloudflare tunnel...')
 
   const cf = spawn('npx', ['cloudflared', 'tunnel', '--url', 'http://localhost:3001'], {
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: true   // required on Windows (npx is npx.cmd)
   })
 
   let tunnelUrl = null

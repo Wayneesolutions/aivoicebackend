@@ -104,12 +104,18 @@ async function handleCallEnded(event) {
   })
   if (!callRecord) return
 
-  const durationSeconds = call.endedAt && call.startedAt
-    ? Math.floor((new Date(call.endedAt) - new Date(call.startedAt)) / 1000)
-    : 0
+  // Vapi's call.startedAt is often null in the webhook payload; fall back to what we recorded
+  const startedAt = call.startedAt ? new Date(call.startedAt) : callRecord.startedAt
+  const endedAt   = call.endedAt   ? new Date(call.endedAt)   : new Date()
+  const durationSeconds = startedAt ? Math.floor((endedAt - startedAt) / 1000) : 0
+  console.log(`[webhook] handleCallEnded — vapiId=${call.id} endedReason=${endedReason} startedAt=${startedAt?.toISOString()} duration=${durationSeconds}s meetingBookedAt=${callRecord.meetingBookedAt}`)
 
-  const outcome = mapVapiEndReason(endedReason) || 'NO_ANSWER'
-  const transcript = formatTranscript(artifact.transcript)
+  // If the AI already booked a meeting via tool-call, honour that outcome regardless of endedReason
+  const mappedOutcome = mapVapiEndReason(endedReason) || 'NO_ANSWER'
+  const outcome = callRecord.meetingBookedAt ? 'BOOKED' : mappedOutcome
+
+  // artifact.transcript = pre-formatted string (older Vapi); artifact.messages = array (newer)
+  const transcript = formatTranscript(artifact.transcript) || formatTranscript(artifact.messages)
   const summary = analysis.summary || null
   const recordingUrl = artifact.recordingUrl || null
 
@@ -232,6 +238,11 @@ async function handleTranscriptUpdate(call) {
 
 async function processMeetingBooking({ callRecord, parameters }) {
   const { tenant, lead } = callRecord
+  console.log('[webhook] book_meeting called — params:', JSON.stringify(parameters))
+
+  // Try to parse the AI's preferred_slot into a real date for display
+  const scheduledMeetingAt = parsePreferredSlot(parameters.preferred_slot)
+
   try {
     const booking = await calendarService.bookMeeting({
       tenant,
@@ -240,14 +251,19 @@ async function processMeetingBooking({ callRecord, parameters }) {
       preferredSlot: parameters.preferred_slot,
       notes:         parameters.notes || ''
     })
+    console.log('[webhook] Cal.com booking response:', JSON.stringify(booking))
+
+    // Cal.com returns the exact start time — prefer that over our parsed slot
+    const confirmedAt = booking.startTime ? new Date(booking.startTime) : scheduledMeetingAt
 
     await prisma.call.update({
       where: { id: callRecord.id },
       data: {
-        outcome:        'BOOKED',
-        meetingBookedAt: new Date(),
-        meetingLink:    booking.meetingUrl || null,
-        calEventId:     booking.uid || null
+        outcome:            'BOOKED',
+        meetingBookedAt:    new Date(),
+        scheduledMeetingAt: confirmedAt,
+        meetingLink:        booking.meetingUrl || null,
+        calEventId:         booking.uid || null
       }
     })
 
@@ -259,24 +275,48 @@ async function processMeetingBooking({ callRecord, parameters }) {
         meetingLink:     booking.meetingUrl || null
       }
     })
+    console.log(`[webhook] Meeting booked — lead ${callRecord.leadId}, scheduledAt: ${confirmedAt}, url: ${booking.meetingUrl}`)
   } catch (err) {
-    console.error('[webhook] Meeting booking failed:', err.message)
+    console.error('[webhook] Meeting booking failed:', err.message, err.response?.data || '')
+    // Cal.com not configured — still mark as BOOKED and store the agreed-upon time
+    await prisma.call.update({
+      where: { id: callRecord.id },
+      data: { outcome: 'BOOKED', meetingBookedAt: new Date(), scheduledMeetingAt }
+    }).catch(() => {})
+    await prisma.lead.update({
+      where: { id: callRecord.leadId },
+      data: { status: 'BOOKED', meetingBookedAt: new Date() }
+    }).catch(() => {})
   }
+}
+
+function parsePreferredSlot(slot) {
+  if (!slot) return null
+  try {
+    const d = new Date(slot)
+    if (!isNaN(d.getTime())) return d
+  } catch {}
+  return null
 }
 
 // ── HELPERS ───────────────────────────────────────────────
 
-function formatTranscript(vapiTranscript) {
-  if (!vapiTranscript || !Array.isArray(vapiTranscript)) return null
-  return vapiTranscript
-    .map(t => `[${t.role.toUpperCase()}] ${t.message}`)
-    .join('\n')
+function formatTranscript(msgs) {
+  if (!msgs || !Array.isArray(msgs) || msgs.length === 0) return null
+  const lines = msgs
+    .map(t => {
+      const role = (t.role || 'unknown').toUpperCase()
+      const text = t.message || t.content || t.text || ''
+      return text ? `[${role}] ${text}` : null
+    })
+    .filter(Boolean)
+  return lines.length ? lines.join('\n') : null
 }
 
 function mapVapiEndReason(reason) {
   const map = {
     'customer-ended-call':      'NOT_INTERESTED',
-    'assistant-ended-call':     'BOOKED',
+    'assistant-ended-call':     'NOT_INTERESTED',  // BOOKED is set separately by checking meetingBookedAt
     'customer-did-not-answer':  'NO_ANSWER',
     'voicemail':                'VOICEMAIL',
     'max-duration-exceeded':    'NO_ANSWER',

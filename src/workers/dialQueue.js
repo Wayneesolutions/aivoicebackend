@@ -58,8 +58,12 @@ async function runScheduler(campaignId = null) {
     }
     const withinHours = isWithinCallingHours(campaign, now)
     if (!withinHours) {
-      const inTz = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
-      console.log(`[dialQueue] Campaign "${campaign.name}" — outside calling hours (${inTz.getHours()}:${String(inTz.getMinutes()).padStart(2,'0')} ${campaign.timezone}, window ${campaign.callFromHour}–${campaign.callToHour}), skipping`)
+      const inTz   = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
+      const hour   = inTz.getHours()
+      const dayName = ['SUN','MON','TUE','WED','THU','FRI','SAT'][inTz.getDay()]
+      const dayOk  = campaign.callDays.split(',').includes(dayName)
+      const timeOk = hour >= campaign.callFromHour && hour < campaign.callToHour
+      console.log(`[dialQueue] Campaign "${campaign.name}" — skipping: day=${dayName} (allowed: ${campaign.callDays}) dayOk=${dayOk}, time=${hour}:${String(inTz.getMinutes()).padStart(2,'0')} (window ${campaign.callFromHour}–${campaign.callToHour}) timeOk=${timeOk}`)
       continue
     }
 

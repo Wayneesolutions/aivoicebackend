@@ -284,9 +284,10 @@ model Call {
   recordingUrl    String?
   
   // Meeting booked during this call
-  meetingBookedAt DateTime?
-  meetingLink     String?
-  calEventId      String?
+  meetingBookedAt    DateTime?   // when the booking was created
+  scheduledMeetingAt DateTime?   // actual scheduled meeting datetime (from Cal.com or preferred_slot)
+  meetingLink        String?
+  calEventId         String?
   
   // Billing
   billedMinutes   Float?      // rounded up to nearest 0.1 min
