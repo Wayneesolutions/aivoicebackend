@@ -14,7 +14,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
     const [calls, total] = await Promise.all([
       prisma.call.findMany({
         where,
-        include: { lead: { select: { name: true, company: true, phone: true } } },
+        include: { lead: { select: { name: true, company: true, phone: true, email: true } } },
         orderBy: { createdAt: 'desc' },
         skip: (parseInt(page) - 1) * parseInt(limit),
         take: parseInt(limit)
@@ -29,21 +29,45 @@ router.get('/stats', requireTenantUser, async (req, res, next) => {
   try {
     const { from, to } = req.query
     const where = { tenantId: req.tenant.id }
-    if (from || to) {
-      where.createdAt = {}
-      if (from) where.createdAt.gte = new Date(from)
-      if (to)   where.createdAt.lte = new Date(to)
-    }
 
-    const [total, byOutcome, minutesData] = await Promise.all([
+    // Default: last 7 days for stats
+    const statsFrom = from ? new Date(from) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+    const statsTo   = to   ? new Date(to)   : new Date()
+    where.createdAt = { gte: statsFrom, lte: statsTo }
+
+    const [total, byOutcome, minutesData, allCalls] = await Promise.all([
       prisma.call.count({ where }),
       prisma.call.groupBy({ by: ['outcome'], where, _count: { _all: true } }),
-      prisma.call.aggregate({ where, _sum: { billedMinutes: true, billedAmount: true } })
+      prisma.call.aggregate({ where, _sum: { billedMinutes: true, billedAmount: true } }),
+      // Fetch minimal data for daily breakdown
+      prisma.call.findMany({
+        where,
+        select: { createdAt: true, outcome: true },
+        orderBy: { createdAt: 'asc' }
+      })
     ])
 
     const outcomeMap = Object.fromEntries(
       byOutcome.filter(o => o.outcome).map(o => [o.outcome, o._count._all])
     )
+
+    // Build daily breakdown for bar chart
+    const dayMap = {}
+    for (let d = new Date(statsFrom); d <= statsTo; d.setDate(d.getDate() + 1)) {
+      const key = d.toISOString().slice(0, 10)
+      dayMap[key] = { date: key, calls: 0, booked: 0 }
+    }
+    for (const c of allCalls) {
+      const key = c.createdAt.toISOString().slice(0, 10)
+      if (dayMap[key]) {
+        dayMap[key].calls++
+        if (c.outcome === 'BOOKED') dayMap[key].booked++
+      }
+    }
+    const callsByDay = Object.values(dayMap).map(d => ({
+      ...d,
+      date: new Date(d.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    }))
 
     res.json({
       total,
@@ -56,7 +80,8 @@ router.get('/stats', requireTenantUser, async (req, res, next) => {
       totalBilled:   Math.round((minutesData._sum.billedAmount  || 0) * 100) / 100,
       conversionRate: total > 0
         ? Math.round((outcomeMap['BOOKED'] || 0) / total * 1000) / 10
-        : 0
+        : 0,
+      callsByDay
     })
   } catch (err) { next(err) }
 })

@@ -9,6 +9,8 @@
     "prisma:migrate": "prisma migrate dev --schema=prisma/schema.prisma"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1068.0",
+    "@aws-sdk/lib-storage": "^3.1068.0",
     "@deepgram/sdk": "^3.3.0",
     "@hubspot/api-client": "^11.1.0",
     "@prisma/client": "^5.14.0",
@@ -28,9 +30,13 @@
     "libphonenumber-js": "^1.11.1",
     "morgan": "^1.11.0",
     "multer": "^1.4.5-lts.1",
+    "multer-s3": "^3.0.1",
+    "nodemailer": "^9.0.0",
     "openai": "^4.52.2",
     "pdf-parse": "^1.1.1",
+    "plivo": "^4.78.0",
     "prisma": "^5.14.0",
+    "stripe": "^22.2.1",
     "twilio": "^5.2.2",
     "uuid": "^10.0.0",
     "ws": "^8.17.1"

@@ -44,6 +44,8 @@ app.use('/api/calls',    require('./routes/calls'))
 app.use('/api/scripts',  require('./routes/scripts'))
 app.use('/api/webhooks', require('./routes/webhooks'))
 app.use('/api/billing',  require('./routes/billing'))
+app.use('/api/stripe',   require('./routes/stripe'))
+app.use('/api/public',   require('./routes/public'))
 
 // ── Health check ────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', ts: new Date() }))

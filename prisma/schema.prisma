@@ -37,10 +37,17 @@ model Tenant {
   updatedAt       DateTime  @updatedAt
 
   // Calendar / CRM integration (optional per client)
-  calcomApiKey        String?   // if they connect their own Cal.com
+  calcomApiKey        String?
   calcomEventTypeId   String?
-  hubspotAccessToken  String?   // if they connect their own HubSpot
-  googleCalendarToken String?   // if they connect Google Calendar
+  hubspotAccessToken  String?
+  googleCalendarToken String?
+
+  // Stripe billing
+  stripeCustomerId    String?   @unique
+
+  // Plan (self-service signup)
+  planId          String?
+  plan            Plan?     @relation(fields: [planId], references: [id])
 
   // Relations
   phoneNumbers    TenantPhone[]
@@ -68,10 +75,12 @@ model TenantPhone {
   
   number        String    @unique   // E.164 format: +12125550100
   friendlyName  String              // "US - New York (212)"
-  country       String              // "US" | "CA" | "UAE"
-  twilioSid     String?             // Twilio phone number SID
+  country       String              // "US" | "CA" | "IN"
+  provider      String    @default("TWILIO")  // "TWILIO" | "PLIVO"
+  twilioSid     String?             // Twilio SID (TWILIO provider)
+  plivoUuid     String?             // Plivo UUID (PLIVO provider)
   vapiNumberId  String?             // Vapi phone number ID
-  
+
   isDefault     Boolean   @default(false)
   isActive      Boolean   @default(true)
   createdAt     DateTime  @default(now())
@@ -107,11 +116,13 @@ enum TenantUserRole {
 // SUPER ADMIN USERS (Wayne Solutions team)
 // ─────────────────────────────────────────────
 model AdminUser {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  passwordHash  String
-  name          String
-  createdAt     DateTime  @default(now())
+  id                   String    @id @default(cuid())
+  email                String    @unique
+  passwordHash         String
+  name                 String
+  passwordResetToken   String?   @unique
+  passwordResetExpiry  DateTime?
+  createdAt            DateTime  @default(now())
 }
 
 // ─────────────────────────────────────────────
@@ -317,6 +328,27 @@ enum CallOutcome {
   WRONG_NUMBER
   OPTED_OUT
   ERROR
+}
+
+// ─────────────────────────────────────────────
+// PLAN
+// Subscription tiers shown on the public pricing page.
+// Admin creates/edits; tenants pick one at self-service signup.
+// ─────────────────────────────────────────────
+model Plan {
+  id              String    @id @default(cuid())
+  name            String                        // "Starter"
+  blurb           String?                       // "Test the waters"
+  price           Float                         // rate per minute charged to client
+  minutesIncluded Int       @default(0)         // 0 = unlimited / pay-as-you-go
+  features        Json                          // ["1 phone number", "1 campaign", ...]
+  isActive        Boolean   @default(true)
+  isPopular       Boolean   @default(false)
+  displayOrder    Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tenants         Tenant[]
 }
 
 // ─────────────────────────────────────────────
