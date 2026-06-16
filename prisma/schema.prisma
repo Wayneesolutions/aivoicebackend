@@ -43,11 +43,16 @@ model Tenant {
   googleCalendarToken String?
 
   // Stripe billing
-  stripeCustomerId    String?   @unique
+  stripeCustomerId      String?   @unique
+  stripeSubscriptionId  String?   @unique
 
   // Plan (self-service signup)
   planId          String?
   plan            Plan?     @relation(fields: [planId], references: [id])
+
+  // Cloned voice (ElevenLabs Instant Voice Cloning)
+  clonedVoiceId   String?   // ElevenLabs voice_id
+  clonedVoiceName String?   // human-readable name the client gave it
 
   // Relations
   phoneNumbers    TenantPhone[]
@@ -146,8 +151,9 @@ model Script {
   faqFileUrl    String?                   // original uploaded file URL
   
   // Voice config
-  voiceId       String        @default("21m00Tcm4TlvDq8ikWAM")  // ElevenLabs voice ID
+  voiceId       String        @default("Zfdm6VIqhPJ3dNiRCAN7")  // ElevenLabs voice ID
   agentName     String        @default("Alex")                    // name the caller uses
+  language      String        @default("en")                      // BCP-47 code: "en", "hi", "es", "fr", etc.
   
   // Approval workflow
   status        ScriptStatus  @default(PENDING_REVIEW)
@@ -345,6 +351,7 @@ model Plan {
   isActive        Boolean   @default(true)
   isPopular       Boolean   @default(false)
   displayOrder    Int       @default(0)
+  stripePriceId   String?   // cached Stripe recurring price ID
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 

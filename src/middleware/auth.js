@@ -36,7 +36,7 @@ async function requireTenantUser(req, res, next) {
 
     const tenant = await prisma.tenant.findUnique({
       where: { id: req.user.tenantId },
-      include: { phoneNumbers: true }
+      include: { phoneNumbers: true, plan: true }
     })
     if (!tenant || tenant.status === 'SUSPENDED')
       return res.status(403).json({ error: 'Tenant not found or suspended' })

@@ -1,13 +1,52 @@
 // backend/src/services/script.js
 // Converts the client's plain-English script into a full LLM system prompt
 
+const LANGUAGE_NAMES = {
+  en: 'English', hi: 'Hindi', es: 'Spanish', fr: 'French', de: 'German',
+  pt: 'Portuguese', ar: 'Arabic', zh: 'Mandarin Chinese', ja: 'Japanese',
+  ko: 'Korean', ru: 'Russian', it: 'Italian', nl: 'Dutch', tr: 'Turkish', pl: 'Polish'
+}
+
+// Per-language style instructions — tuned for natural human speech
+const LANGUAGE_STYLE = {
+  hi: `━━━━ LANGUAGE STYLE (CRITICAL — READ FIRST) ━━━━
+Speak in natural HINGLISH — the way educated Indians actually talk on phone calls.
+This means: Hindi sentence structure and flow, but freely mix in English words wherever they feel natural.
+RULES:
+- Use English for: business terms (meeting, call, software, solution, team, project, budget, demo, proposal), numbers, company names, product names, tech words.
+- Use Hindi for: conversational connectors (toh, aur, matlab, bas, theek hai, bilkul, suno, dekho, actually), greetings, transitions, emotions.
+- Example: "Toh basically humara solution aapki team ko help karta hai apna efficiency improve karne mein."
+- Example: "Aapke paas koi 15 minutes hain ek quick call ke liye?"
+- NEVER use formal pure Hindi words like "उपाय", "सेवाएँ", "प्रस्तुत" — use their natural Hinglish equivalents.
+- Match the prospect's language style — if they speak more English, lean more English. If more Hindi, lean more Hindi.`,
+
+  es: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Spanish. Use Latin American Spanish tone — warm and direct. English technical terms (software, email, meeting) are fine to keep in English.`,
+  fr: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational French. Keep technical English terms as-is. Be warm and professional.`,
+  de: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational German. Keep technical English terms as-is. Be direct and professional.`,
+  pt: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Brazilian Portuguese. Keep English tech terms as-is.`,
+  ar: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural Modern Standard Arabic or Gulf dialect depending on context. English business terms are fine to keep.`,
+  zh: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural Mandarin Chinese. English technical and business terms can stay in English.`,
+  ja: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Japanese. Use polite but friendly keigo. English tech terms are fine.`,
+  ko: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Korean. Use polite speech level. English tech/business terms are fine.`,
+  ru: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Russian. English tech and business terms can stay as-is.`,
+  it: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Italian. English tech terms are fine to keep.`,
+  nl: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Dutch. English tech terms are fine — Dutch speakers use them naturally.`,
+  tr: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Turkish. English tech and business terms can stay as-is.`,
+  pl: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Polish. English tech terms are fine to keep.`,
+}
+
 /**
  * Takes a Script record and compiles it into a production-ready system prompt.
  * This is the core magic — the client writes in plain English,
  * your system wraps it with all the AI calling rules automatically.
  */
 function compileSystemPrompt(script) {
-  const prompt = `
+  const lang = script.language || 'en'
+  const langRule = lang !== 'en' && LANGUAGE_STYLE[lang]
+    ? `\n${LANGUAGE_STYLE[lang]}\n`
+    : ''
+
+  const prompt = `${langRule}
 You are ${script.agentName}, making a professional outbound sales call right now.
 The person you are calling is named {{prospect_name}}{{prospect_company ? " from " + prospect_company : ""}}.
 
@@ -128,4 +167,4 @@ function getVapiFunctions() {
   ]
 }
 
-module.exports = { compileSystemPrompt, getVapiFunctions }
+module.exports = { compileSystemPrompt, getVapiFunctions, LANGUAGE_NAMES }

@@ -146,8 +146,95 @@ router.get('/invoices', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// ── POST /api/stripe/checkout ─────────────────────────────────────────────────
+// Creates a Stripe Checkout Session for plan subscription purchase.
+// Client is redirected to Stripe's hosted checkout page.
+router.post('/checkout', requireTenantOwner, async (req, res, next) => {
+  try {
+    const { planId } = req.body
+    if (!planId) return res.status(400).json({ error: 'planId required' })
+
+    const [plan, tenant] = await Promise.all([
+      prisma.plan.findUnique({ where: { id: planId } }),
+      prisma.tenant.findUnique({ where: { id: req.tenant.id } })
+    ])
+
+    if (!plan || !plan.isActive) return res.status(404).json({ error: 'Plan not found' })
+    if (plan.price === 0) return res.status(400).json({ error: 'Free plans do not require checkout' })
+    if (plan.minutesIncluded === 0) {
+      return res.status(400).json({ error: 'Unlimited plans require a custom quote — contact us.' })
+    }
+
+    // Monthly subscription amount = per-min rate × included minutes (in cents)
+    const monthlyAmountCents = Math.round(plan.price * plan.minutesIncluded * 100)
+
+    // Create or get Stripe customer
+    let customerId = tenant.stripeCustomerId
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        name:  tenant.name,
+        email: req.user.email,
+        metadata: { tenantId: tenant.id }
+      })
+      customerId = customer.id
+      await prisma.tenant.update({ where: { id: tenant.id }, data: { stripeCustomerId: customerId } })
+    }
+
+    // Get or create Stripe Price (cached on plan.stripePriceId to avoid duplicates)
+    let priceId = plan.stripePriceId
+    if (!priceId) {
+      const product = await stripe.products.create({
+        name: `VoCallM ${plan.name} Plan`,
+        metadata: { planId: plan.id }
+      })
+      const price = await stripe.prices.create({
+        product:   product.id,
+        unit_amount: monthlyAmountCents,
+        currency:  'usd',
+        recurring: { interval: 'month' },
+      })
+      priceId = price.id
+      await prisma.plan.update({ where: { id: plan.id }, data: { stripePriceId: priceId } })
+    }
+
+    // Redirect back to billing page after checkout
+    const origin = req.headers.origin || process.env.FRONTEND_ADMIN_URL || 'http://localhost:8080'
+
+    // If tenant already has a subscription, use subscription update instead
+    if (tenant.stripeSubscriptionId) {
+      const sub = await stripe.subscriptions.retrieve(tenant.stripeSubscriptionId)
+      await stripe.subscriptions.update(tenant.stripeSubscriptionId, {
+        items: [{ id: sub.items.data[0].id, price: priceId }],
+        metadata: { tenantId: tenant.id, planId: plan.id },
+        proration_behavior: 'always_invoice',
+      })
+      // Assign plan immediately on upgrade
+      await prisma.tenant.update({
+        where: { id: tenant.id },
+        data: { planId: plan.id, ratePerMinute: plan.price }
+      })
+      return res.json({ upgraded: true })
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer:   customerId,
+      mode:       'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      metadata:   { tenantId: tenant.id, planId: plan.id },
+      subscription_data: {
+        metadata: { tenantId: tenant.id, planId: plan.id }
+      },
+      success_url: `${origin}/portal/billing?checkout=success`,
+      cancel_url:  `${origin}/portal/billing?checkout=cancelled`,
+      allow_promotion_codes: true,
+      billing_address_collection: 'auto',
+    })
+
+    res.json({ url: session.url })
+  } catch (err) { next(err) }
+})
+
 // ── POST /api/stripe/webhook ──────────────────────────────────────────────────
-// Stripe sends payment events here (invoice.paid, invoice.payment_failed, etc.)
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature']
   let event
@@ -160,21 +247,75 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
   try {
     switch (event.type) {
+
+      // ── Plan purchase completed ──────────────────────────────────────────────
+      case 'checkout.session.completed': {
+        const session = event.data.object
+        if (session.mode !== 'subscription') break
+
+        const { tenantId, planId } = session.metadata || {}
+        if (!tenantId || !planId) break
+
+        const plan = await prisma.plan.findUnique({ where: { id: planId } })
+        if (!plan) break
+
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: {
+            planId,
+            ratePerMinute:        plan.price,
+            stripeCustomerId:     session.customer,
+            stripeSubscriptionId: session.subscription,
+          }
+        })
+        console.log(`[stripe] Plan "${plan.name}" activated for tenant ${tenantId}`)
+        break
+      }
+
+      // ── Subscription invoice paid — log it ──────────────────────────────────
       case 'invoice.paid': {
         const inv = event.data.object
-        const customer = await stripe.customers.retrieve(inv.customer)
-        const tenantId = customer.metadata?.tenantId
-        if (tenantId) {
-          console.log(`[stripe] Invoice paid — tenant ${tenantId}, amount $${inv.amount_paid / 100}`)
-          // Could update a "balance" or send a receipt email here
+        // Only subscription invoices (not our manual usage ones)
+        if (!inv.subscription) break
+        const tenant = await prisma.tenant.findFirst({
+          where: { stripeSubscriptionId: inv.subscription }
+        })
+        if (tenant) {
+          console.log(`[stripe] Subscription invoice paid — tenant ${tenant.id}, $${inv.amount_paid / 100}`)
         }
         break
       }
+
+      // ── Payment failed — pause campaigns ────────────────────────────────────
       case 'invoice.payment_failed': {
         const inv = event.data.object
-        const customer = await stripe.customers.retrieve(inv.customer)
-        console.error(`[stripe] Payment failed — customer ${inv.customer}, tenant ${customer.metadata?.tenantId}`)
-        // Could pause the tenant's campaigns here
+        if (!inv.subscription) break
+        const tenant = await prisma.tenant.findFirst({
+          where: { stripeSubscriptionId: inv.subscription }
+        })
+        if (tenant) {
+          await prisma.campaign.updateMany({
+            where: { tenantId: tenant.id, status: 'ACTIVE' },
+            data:  { status: 'PAUSED' }
+          })
+          console.warn(`[stripe] Payment failed — paused campaigns for tenant ${tenant.id}`)
+        }
+        break
+      }
+
+      // ── Subscription cancelled ───────────────────────────────────────────────
+      case 'customer.subscription.deleted': {
+        const sub = event.data.object
+        const tenant = await prisma.tenant.findFirst({
+          where: { stripeSubscriptionId: sub.id }
+        })
+        if (tenant) {
+          await prisma.tenant.update({
+            where: { id: tenant.id },
+            data: { planId: null, stripeSubscriptionId: null }
+          })
+          console.log(`[stripe] Subscription cancelled for tenant ${tenant.id}`)
+        }
         break
       }
     }

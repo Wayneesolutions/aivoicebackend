@@ -118,6 +118,7 @@ async function runScheduler(campaignId = null) {
         fromNumberId:    phoneRecord.id,
         vapiNumberId:    phoneRecord.vapiNumberId,
         vapiAssistantId,
+        clonedVoiceId:   campaign.tenant.clonedVoiceId || null,
         leadName:        lead.name,
         leadCompany:     lead.company || '',
         leadTitle:       lead.title   || ''
@@ -134,7 +135,7 @@ async function runScheduler(campaignId = null) {
 // runs at most 10 of these in parallel across all server instances.
 
 async function dialLead(job) {
-  const { leadId, campaignId, tenantId, toNumber, fromNumberId, vapiNumberId, vapiAssistantId, leadName, leadCompany, leadTitle } = job.data
+  const { leadId, campaignId, tenantId, toNumber, fromNumberId, vapiNumberId, vapiAssistantId, clonedVoiceId, leadName, leadCompany, leadTitle } = job.data
 
   const parsed = parsePhoneNumberFromString(toNumber)
   if (!parsed || !parsed.isValid()) {
@@ -153,6 +154,7 @@ async function dialLead(job) {
 
   const vapiCall = await vapiService.startOutboundCall({
     toNumber, vapiNumberId, vapiAssistantId,
+    voiceOverrideId: clonedVoiceId || undefined,
     metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
   })
 

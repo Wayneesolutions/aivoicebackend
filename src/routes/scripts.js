@@ -2,10 +2,34 @@
 const router = require('express').Router()
 const multer = require('multer')
 const pdfParse = require('pdf-parse')
+const axios = require('axios')
 const { PrismaClient } = require('@prisma/client')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const prisma = new PrismaClient()
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } })
+
+// GET /api/scripts/voices — ElevenLabs voice list (cloned first, then premade)
+router.get('/voices', requireTenantUser, async (req, res, next) => {
+  try {
+    const resp = await axios.get('https://api.elevenlabs.io/v1/voices', {
+      headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY }
+    })
+    const categoryOrder = { cloned: 0, generated: 1, premade: 2 }
+    const voices = resp.data.voices
+      .map(v => ({
+        id: v.voice_id,
+        name: v.name,
+        category: v.category,
+        gender: v.labels?.gender || null,
+        accent: v.labels?.accent || null,
+        language: v.labels?.language || null,
+        description: v.labels?.description || null,
+        previewUrl: v.preview_url || null,
+      }))
+      .sort((a, b) => (categoryOrder[a.category] ?? 3) - (categoryOrder[b.category] ?? 3))
+    res.json(voices)
+  } catch (err) { next(err) }
+})
 
 // GET /api/scripts
 router.get('/', requireTenantUser, async (req, res, next) => {
@@ -21,7 +45,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
 // POST /api/scripts — client submits new script for approval
 router.post('/', requireTenantOwner, async (req, res, next) => {
   try {
-    const { name, companyInfo, servicesInfo, goalText, objections, agentName, voiceId } = req.body
+    const { name, companyInfo, servicesInfo, goalText, objections, agentName, voiceId, language } = req.body
     if (!companyInfo || !servicesInfo || !goalText)
       return res.status(400).json({ error: 'companyInfo, servicesInfo, and goalText required' })
 
@@ -33,6 +57,7 @@ router.post('/', requireTenantOwner, async (req, res, next) => {
         objections:  objections || null,
         agentName:   agentName  || 'Alex',
         voiceId:     voiceId    || process.env.ELEVENLABS_DEFAULT_VOICE_ID,
+        language:    language   || 'en',
         status:      'PENDING_REVIEW'
       }
     })

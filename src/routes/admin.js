@@ -124,6 +124,7 @@ router.get('/tenants', async (req, res, next) => {
     const tenants = await prisma.tenant.findMany({
       include: {
         phoneNumbers: true,
+        plan: { select: { id: true, name: true, price: true, minutesIncluded: true } },
         _count: { select: { leads: true, calls: true, campaigns: true } }
       },
       orderBy: { createdAt: 'desc' }
@@ -194,7 +195,22 @@ router.patch('/tenants/:id', async (req, res, next) => {
     const data = {}
     allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k] })
 
-    const tenant = await prisma.tenant.update({ where: { id: req.params.id }, data })
+    // planId: allow explicit null to unassign, or a string ID to assign
+    if (req.body.planId !== undefined) {
+      data.planId = req.body.planId || null
+    }
+
+    // clonedVoiceId: admin can assign any ElevenLabs voice ID directly (null to clear)
+    if (req.body.clonedVoiceId !== undefined) {
+      data.clonedVoiceId   = req.body.clonedVoiceId   || null
+      data.clonedVoiceName = req.body.clonedVoiceName || null
+    }
+
+    const tenant = await prisma.tenant.update({
+      where: { id: req.params.id },
+      data,
+      include: { plan: { select: { id: true, name: true, price: true, minutesIncluded: true } } }
+    })
     res.json(tenant)
   } catch (err) { next(err) }
 })
@@ -237,7 +253,13 @@ router.get('/numbers', async (req, res, next) => {
 // GET /api/admin/numbers/search?provider=TWILIO&country=US&areaCode=212
 router.get('/numbers/search', async (req, res, next) => {
   try {
-    const { provider = 'TWILIO', country = 'US', areaCode, contains, pattern, limit } = req.query
+    const { provider = 'TWILIO', country = 'US', limit } = req.query
+    // Strip any "undefined" strings that the frontend may accidentally send
+    const clean = (v) => (v && v !== 'undefined' && v !== 'null' ? v : undefined)
+    const areaCode = clean(req.query.areaCode)
+    const contains = clean(req.query.contains)
+    const pattern  = clean(req.query.pattern)
+
     const results = await phoneProviders.searchAvailable({
       provider: provider.toUpperCase(),
       country: country.toUpperCase(),
@@ -368,7 +390,8 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
       name: `${script.agentName} — ${script.id}`,
       systemPrompt: compiledPrompt,
       voiceId: script.voiceId,
-      agentName: script.agentName
+      agentName: script.agentName,
+      language: script.language || 'en'
     })
 
     const updated = await prisma.script.update({

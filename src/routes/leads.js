@@ -108,4 +108,21 @@ router.delete('/:id', requireTenantOwner, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// PATCH /api/leads/:id/reset — re-enable an opted-out or exhausted lead for calling
+router.patch('/:id/reset', requireTenantOwner, async (req, res, next) => {
+  try {
+    const lead = await prisma.lead.update({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      data: {
+        status:      'PENDING',
+        isOptedOut:  false,
+        optedOutAt:  null,
+        callAttempts: 0,
+        lastCalledAt: null,
+      }
+    })
+    res.json(lead)
+  } catch (err) { next(err) }
+})
+
 module.exports = router

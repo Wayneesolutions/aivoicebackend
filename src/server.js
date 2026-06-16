@@ -25,8 +25,9 @@ app.use(cors({
   credentials: true
 }))
 
-// Raw body for Twilio/Vapi webhook signature validation
-app.use('/api/webhooks', express.raw({ type: '*/*' }))
+// Raw body must be registered BEFORE express.json() for routes that need it
+app.use('/api/webhooks',        express.raw({ type: '*/*' }))           // Twilio/Vapi
+app.use('/api/stripe/webhook',  express.raw({ type: 'application/json' })) // Stripe
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
