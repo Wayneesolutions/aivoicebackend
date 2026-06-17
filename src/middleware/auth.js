@@ -1,7 +1,6 @@
 // backend/src/middleware/auth.js
 const jwt = require('jsonwebtoken')
-const { PrismaClient } = require('@prisma/client')
-const prisma = new PrismaClient()
+const prisma = require('../lib/prisma')
 
 // Verify JWT and attach user to req
 function verifyToken(req, res, next) {
@@ -19,7 +18,7 @@ function verifyToken(req, res, next) {
   }
 }
 
-// Must be a super admin (Wayne Solutions team)
+// Must be a super admin (Wayne E Solutions team)
 async function requireAdmin(req, res, next) {
   verifyToken(req, res, async () => {
     if (req.user.role !== 'ADMIN')

@@ -3,9 +3,8 @@ const router = require('express').Router()
 const multer = require('multer')
 const pdfParse = require('pdf-parse')
 const axios = require('axios')
-const { PrismaClient } = require('@prisma/client')
+const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
-const prisma = new PrismaClient()
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } })
 
 // GET /api/scripts/voices — ElevenLabs voice list (cloned first, then premade)
@@ -14,8 +13,10 @@ router.get('/voices', requireTenantUser, async (req, res, next) => {
     const resp = await axios.get('https://api.elevenlabs.io/v1/voices', {
       headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY }
     })
+    const tenantClonedVoiceId = req.tenant.clonedVoiceId
     const categoryOrder = { cloned: 0, generated: 1, premade: 2 }
     const voices = resp.data.voices
+      .filter(v => v.category !== 'cloned' || v.voice_id === tenantClonedVoiceId)
       .map(v => ({
         id: v.voice_id,
         name: v.name,

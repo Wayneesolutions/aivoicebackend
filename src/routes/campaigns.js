@@ -1,9 +1,8 @@
 // backend/src/routes/campaigns.js
 const router = require('express').Router()
-const { PrismaClient } = require('@prisma/client')
+const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const { triggerCampaign } = require('../workers/dialQueue')
-const prisma = new PrismaClient()
 
 router.get('/', requireTenantUser, async (req, res, next) => {
   try {
@@ -21,7 +20,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
 
 router.post('/', requireTenantOwner, async (req, res, next) => {
   try {
-    const { name, scriptId, callFromHour, callToHour, timezone, callDays, maxAttempts, retryAfterHours, includeAllLeads } = req.body
+    const { name, scriptId, callFromHour, callToHour, timezone, callDays, maxAttempts, retryAfterHours, includeAllLeads, leadIds } = req.body
     if (!name || !scriptId) return res.status(400).json({ error: 'name and scriptId required' })
 
     const script = await prisma.script.findFirst({ where: { id: scriptId, tenantId: req.tenant.id } })
@@ -39,8 +38,14 @@ router.post('/', requireTenantOwner, async (req, res, next) => {
       }
     })
 
-    // Assign all unassigned PENDING leads to this campaign
-    if (includeAllLeads) {
+    if (Array.isArray(leadIds) && leadIds.length > 0) {
+      // Assign only the selected leads (must belong to this tenant and be unassigned)
+      await prisma.lead.updateMany({
+        where: { id: { in: leadIds }, tenantId: req.tenant.id, campaignId: null, isOptedOut: false },
+        data: { campaignId: campaign.id }
+      })
+    } else if (includeAllLeads) {
+      // Assign all unassigned PENDING leads
       await prisma.lead.updateMany({
         where: { tenantId: req.tenant.id, campaignId: null, status: 'PENDING', isOptedOut: false },
         data: { campaignId: campaign.id }

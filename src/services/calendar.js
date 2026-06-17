@@ -1,5 +1,5 @@
 // backend/src/services/calendar.js
-// Handles meeting booking — Wayne Solutions master calendar by default,
+// Handles meeting booking — Wayne E Solutions master calendar by default,
 // or client's own Cal.com / Google Calendar if they've connected it
 
 const axios = require('axios')
@@ -7,7 +7,7 @@ const axios = require('axios')
 /**
  * Book a meeting after a successful call.
  * Automatically uses the client's own calendar if configured,
- * otherwise falls back to Wayne Solutions master calendar.
+ * otherwise falls back to Wayne E Solutions master calendar.
  */
 async function bookMeeting({ tenant, prospectName, prospectEmail, preferredSlot, notes }) {
   // Use client's own Cal.com if they've connected it
@@ -19,12 +19,12 @@ async function bookMeeting({ tenant, prospectName, prospectEmail, preferredSlot,
     })
   }
 
-  // Otherwise use Wayne Solutions master Cal.com account
+  // Otherwise use Wayne E Solutions master Cal.com account
   return await bookCalcom({
     apiKey:      process.env.CALCOM_API_KEY,
     eventTypeId: parseInt(process.env.CALCOM_EVENT_TYPE_ID),
     prospectName, prospectEmail, preferredSlot, notes,
-    // Add client name to notes so Wayne Solutions knows which client it's for
+    // Add client name to notes so Wayne E Solutions knows which client it's for
     notes: `[Client: ${tenant.name}]\n${notes || ''}`
   })
 }

@@ -2,18 +2,23 @@
 // Vapi sends every call event here — this is the brain of the post-call processing
 const router = require('express').Router()
 const crypto = require('crypto')
-const { PrismaClient } = require('@prisma/client')
+const prisma = require('../lib/prisma')
 const calendarService = require('../services/calendar')
 const crmService      = require('../services/crm')
 const billingService  = require('../services/billing')
-const prisma = new PrismaClient()
 
 // Vapi sends x-vapi-secret header with the raw secret value (not HMAC)
 function verifyVapiSignature(signatureHeader) {
   const secret = process.env.VAPI_WEBHOOK_SECRET
   if (!secret) return true
   if (!signatureHeader) return false
-  return signatureHeader === secret
+  try {
+    const a = Buffer.from(signatureHeader)
+    const b = Buffer.from(secret)
+    return a.length === b.length && crypto.timingSafeEqual(a, b)
+  } catch {
+    return false
+  }
 }
 
 // POST /api/webhooks/vapi
@@ -22,11 +27,10 @@ router.post('/vapi', async (req, res) => {
   console.log('[webhook/vapi] INCOMING — headers:', JSON.stringify(req.headers))
 
   const secret = req.headers['x-vapi-secret']
-  // Temporarily skip auth so we can see if webhooks arrive at all
-  // if (!verifyVapiSignature(secret)) {
-  //   console.warn('[webhook/vapi] Rejected — invalid x-vapi-secret')
-  //   return res.status(401).json({ error: 'Invalid webhook signature' })
-  // }
+  if (!verifyVapiSignature(secret)) {
+    console.warn('[webhook/vapi] Rejected — invalid x-vapi-secret')
+    return res.status(401).json({ error: 'Invalid webhook signature' })
+  }
 
   // Always respond 200 immediately — Vapi retries on timeout
   res.status(200).json({ received: true })

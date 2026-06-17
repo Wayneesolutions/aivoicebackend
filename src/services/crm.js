@@ -1,5 +1,5 @@
 // backend/src/services/crm.js
-// Logs calls to HubSpot — Wayne Solutions master account or client's own
+// Logs calls to HubSpot — Wayne E Solutions master account or client's own
 const hubspot = require('@hubspot/api-client')
 
 async function logCall({ tenant, lead, call }) {

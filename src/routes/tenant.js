@@ -1,11 +1,22 @@
 // backend/src/routes/tenant.js
 const router = require('express').Router()
 const multer = require('multer')
-const axios = require('axios')
-const { PrismaClient } = require('@prisma/client')
+const axios  = require('axios')
+const bcrypt = require('bcryptjs')
+const path   = require('path')
+const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const { getUsageSummary } = require('../services/billing')
-const prisma = new PrismaClient()
+const storageService = require('../services/storage')
+
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter(req, file, cb) {
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image files are allowed'))
+    cb(null, true)
+  }
+})
 
 const voiceUpload = multer({
   storage: multer.memoryStorage(),
@@ -20,6 +31,8 @@ router.get('/me', requireTenantUser, async (req, res) => {
   const t = req.tenant
   res.json({
     id: t.id, name: t.name, slug: t.slug,
+    ownerName: t.ownerName || null,
+    ownerEmail: t.ownerEmail || null,
     domain: t.domain, logoUrl: t.logoUrl,
     primaryColor: t.primaryColor, status: t.status,
     ratePerMinute: t.ratePerMinute, totalMinutes: t.totalMinutes,
@@ -28,6 +41,8 @@ router.get('/me', requireTenantUser, async (req, res) => {
     hasGcal:      !!t.googleCalendarToken,
     clonedVoiceId:   t.clonedVoiceId   || null,
     clonedVoiceName: t.clonedVoiceName || null,
+    planExpiresAt: t.planExpiresAt ?? null,
+    hasSubscription: !!t.stripeSubscriptionId,
     plan: t.plan ? {
       id: t.plan.id,
       name: t.plan.name,
@@ -36,6 +51,55 @@ router.get('/me', requireTenantUser, async (req, res) => {
       features: t.plan.features || [],
     } : null,
   })
+})
+
+// PATCH /api/tenant/profile — update company name, owner name, brand colour
+router.patch('/profile', requireTenantOwner, async (req, res, next) => {
+  try {
+    const allowed = ['name', 'ownerName', 'primaryColor']
+    const data = {}
+    allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k] })
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'No valid fields provided' })
+    const tenant = await prisma.tenant.update({ where: { id: req.tenant.id }, data })
+    res.json({ name: tenant.name, ownerName: tenant.ownerName, primaryColor: tenant.primaryColor })
+  } catch (err) { next(err) }
+})
+
+// POST /api/tenant/logo — upload/replace company logo
+router.post('/logo', requireTenantOwner, logoUpload.single('logo'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
+    const ext      = path.extname(req.file.originalname).toLowerCase() || '.png'
+    const filename = `${req.tenant.id}-${Date.now()}${ext}`
+    const logoUrl  = await storageService.uploadFile({
+      buffer: req.file.buffer, mimetype: req.file.mimetype, filename, folder: 'logos'
+    })
+    await prisma.tenant.update({ where: { id: req.tenant.id }, data: { logoUrl } })
+    res.json({ logoUrl })
+  } catch (err) { next(err) }
+})
+
+// PATCH /api/tenant/password — change account password
+router.patch('/password', requireTenantOwner, async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ error: 'currentPassword and newPassword required' })
+    if (newPassword.length < 8)
+      return res.status(400).json({ error: 'New password must be at least 8 characters' })
+
+    const user = await prisma.tenantUser.findFirst({
+      where: { tenantId: req.tenant.id, email: req.tenant.ownerEmail }
+    })
+    if (!user) return res.status(404).json({ error: 'User not found' })
+
+    const valid = await bcrypt.compare(currentPassword, user.passwordHash)
+    if (!valid) return res.status(400).json({ error: 'Current password is incorrect' })
+
+    const passwordHash = await bcrypt.hash(newPassword, 12)
+    await prisma.tenantUser.update({ where: { id: user.id }, data: { passwordHash } })
+    res.json({ message: 'Password updated' })
+  } catch (err) { next(err) }
 })
 
 // POST /api/tenant/voice — upload audio, clone on ElevenLabs, save voice ID

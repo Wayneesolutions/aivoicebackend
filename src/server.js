@@ -10,17 +10,18 @@ const morgan = require('morgan')
 const app = express()
 const httpServer = createServer(app)
 
-// ── Static: uploaded files (logos, docs) ───────────────
-app.use('/uploads', express.static(require('path').join(__dirname, '../uploads')))
+// ── Static: only the logos subfolder is publicly accessible ──
+app.use('/uploads/logos', express.static(require('path').join(__dirname, '../uploads/logos')))
 
 // ── Middleware ──────────────────────────────────────────
 app.use(morgan('dev'))
 app.use(helmet())
+const escapedDomain = (process.env.DOMAIN || 'yourdomain.com').replace(/\./g, '\\.')
 app.use(cors({
   origin: [
     process.env.FRONTEND_ADMIN_URL,
     process.env.FRONTEND_CLIENT_URL,
-    /\.yourdomain\.com$/   // allow all subdomains for white-label
+    new RegExp(`\\.${escapedDomain}$`)
   ],
   credentials: true
 }))
@@ -31,7 +32,8 @@ app.use('/api/stripe/webhook',  express.raw({ type: 'application/json' })) // St
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
-// Rate limiting
+// Rate limiting — registration is stricter (5 accounts per IP per hour)
+app.use('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 5, message: 'Too many registration attempts' }))
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: 'Too many requests' }))
 app.use('/api', rateLimit({ windowMs: 1 * 60 * 1000, max: 300 }))
 

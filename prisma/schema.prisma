@@ -49,6 +49,7 @@ model Tenant {
   // Plan (self-service signup)
   planId          String?
   plan            Plan?     @relation(fields: [planId], references: [id])
+  planExpiresAt   DateTime?   // set from Stripe current_period_end; null = free/never expires
 
   // Cloned voice (ElevenLabs Instant Voice Cloning)
   clonedVoiceId   String?   // ElevenLabs voice_id

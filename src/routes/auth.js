@@ -3,10 +3,9 @@ const router = require('express').Router()
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const crypto = require('crypto')
-const { PrismaClient } = require('@prisma/client')
+const prisma = require('../lib/prisma')
 const { requireAdmin } = require('../middleware/auth')
 const emailService = require('../services/email')
-const prisma = new PrismaClient()
 
 function signToken(payload) {
   return jwt.sign(payload, process.env.JWT_SECRET, {
@@ -91,6 +90,8 @@ router.post('/register', async (req, res, next) => {
     const { name, company, email, password, planId } = req.body
     if (!name || !company || !email || !password)
       return res.status(400).json({ error: 'name, company, email and password are required' })
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      return res.status(400).json({ error: 'Invalid email address' })
     if (password.length < 8)
       return res.status(400).json({ error: 'Password must be at least 8 characters' })
 
@@ -142,6 +143,11 @@ router.post('/register', async (req, res, next) => {
       tenantId: tenant.id,
     })
 
+    // Fire-and-forget welcome email (don't block registration if email fails)
+    emailService.sendWelcomeEmail(email, name, company).catch(e =>
+      console.error('[email] Welcome email failed:', e.message)
+    )
+
     res.status(201).json({
       token,
       user: { id: user.id, name: user.name, email: user.email, role: user.role },
@@ -156,9 +162,13 @@ router.post('/register', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// POST /api/auth/admin/seed  — creates first admin (run once, then disable)
+// POST /api/auth/admin/seed  — creates first admin (requires x-seed-secret header matching ADMIN_SEED_SECRET env var)
 router.post('/admin/seed', async (req, res, next) => {
   try {
+    const seedSecret = process.env.ADMIN_SEED_SECRET
+    if (!seedSecret || req.headers['x-seed-secret'] !== seedSecret)
+      return res.status(403).json({ error: 'Forbidden' })
+
     const count = await prisma.adminUser.count()
     if (count > 0)
       return res.status(400).json({ error: 'Admin already exists' })
@@ -167,6 +177,64 @@ router.post('/admin/seed', async (req, res, next) => {
     const passwordHash = await bcrypt.hash(password, 12)
     const admin = await prisma.adminUser.create({ data: { email, passwordHash, name } })
     res.json({ message: 'Admin created', id: admin.id })
+  } catch (err) { next(err) }
+})
+
+// ── TENANT FORGOT / RESET PASSWORD ────────────────────────────────────────────
+
+// POST /api/auth/tenant/forgot-password
+router.post('/tenant/forgot-password', async (req, res, next) => {
+  try {
+    const { email } = req.body
+    if (!email) return res.status(400).json({ error: 'Email required' })
+
+    const user = await prisma.tenantUser.findFirst({ where: { email } })
+    // Always return same response to prevent enumeration
+    if (!user) return res.json({ message: 'If that email exists, a reset link has been sent.' })
+
+    // JWT-based token (no schema changes needed):
+    // phash = first 8 chars of password hash digest — auto-invalidates after password changes
+    const phash = crypto.createHash('sha256').update(user.passwordHash).digest('hex').slice(0, 8)
+    const resetToken = jwt.sign(
+      { sub: user.id, email: user.email, type: 'tenant_pw_reset', phash },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    )
+
+    await emailService.sendTenantPasswordReset(email, resetToken)
+    res.json({ message: 'If that email exists, a reset link has been sent.' })
+  } catch (err) { next(err) }
+})
+
+// POST /api/auth/tenant/reset-password
+router.post('/tenant/reset-password', async (req, res, next) => {
+  try {
+    const { token, password } = req.body
+    if (!token || !password) return res.status(400).json({ error: 'Token and password required' })
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' })
+
+    let payload
+    try {
+      payload = jwt.verify(token, process.env.JWT_SECRET)
+    } catch {
+      return res.status(400).json({ error: 'Reset link is invalid or has expired' })
+    }
+
+    if (payload.type !== 'tenant_pw_reset')
+      return res.status(400).json({ error: 'Invalid token' })
+
+    const user = await prisma.tenantUser.findUnique({ where: { id: payload.sub } })
+    if (!user) return res.status(400).json({ error: 'User not found' })
+
+    // Confirm password hasn't changed since token was issued (one-time use)
+    const currentPhash = crypto.createHash('sha256').update(user.passwordHash).digest('hex').slice(0, 8)
+    if (currentPhash !== payload.phash)
+      return res.status(400).json({ error: 'Reset link has already been used' })
+
+    const passwordHash = await bcrypt.hash(password, 12)
+    await prisma.tenantUser.update({ where: { id: user.id }, data: { passwordHash } })
+
+    res.json({ message: 'Password updated successfully. You can now sign in.' })
   } catch (err) { next(err) }
 })
 
@@ -179,7 +247,8 @@ router.post('/admin/forgot-password', async (req, res, next) => {
     if (!email) return res.status(400).json({ error: 'Email required' })
 
     const admin = await prisma.adminUser.findUnique({ where: { email } })
-    if (!admin) return res.status(404).json({ error: 'No admin account is registered with this email address.' })
+    // Always return the same response regardless of whether the email exists (prevents enumeration)
+    if (!admin) return res.json({ message: 'If that email exists, a reset link has been sent.' })
 
     const rawToken = crypto.randomBytes(32).toString('hex')
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')

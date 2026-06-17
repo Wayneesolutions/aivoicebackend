@@ -2,8 +2,7 @@
 const router = require('express').Router()
 const { requireTenantUser } = require('../middleware/auth')
 const { getUsageSummary } = require('../services/billing')
-const { PrismaClient } = require('@prisma/client')
-const prisma = new PrismaClient()
+const prisma = require('../lib/prisma')
 
 router.get('/summary', requireTenantUser, async (req, res, next) => {
   try {

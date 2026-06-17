@@ -2,11 +2,14 @@
 const axios = require('axios')
 const { getVapiFunctions } = require('./script')
 
-// Map our BCP-47 codes to Deepgram language codes
+// Map our language codes to Deepgram language codes
+// hinglish = Hindi transcription (prospect may speak Hindi or mixed)
+// pa = Punjabi
 const DEEPGRAM_LANG = {
-  en: 'en-US', hi: 'hi',  es: 'es',    fr: 'fr',  de: 'de',
-  pt: 'pt',    ar: 'ar',  zh: 'zh-CN', ja: 'ja',  ko: 'ko',
-  ru: 'ru',    it: 'it',  nl: 'nl',    tr: 'tr',  pl: 'pl'
+  en: 'en-US', hi: 'hi', hinglish: 'hi', pa: 'hi',
+  es: 'es',    fr: 'fr', de: 'de',
+  pt: 'pt',    ar: 'ar', zh: 'zh-CN', ja: 'ja',  ko: 'ko',
+  ru: 'ru',    it: 'it', nl: 'nl',    tr: 'tr',  pl: 'pl'
 }
 
 const vapiClient = axios.create({
@@ -84,7 +87,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
  * Trigger an outbound call via Vapi.
  * Returns the Vapi call object.
  */
-async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId }) {
+async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId, systemPromptOverride }) {
   if (!vapiNumberId) throw new Error('vapiNumberId is required for outbound calls')
 
   const assistantOverrides = {
@@ -108,6 +111,12 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
         ? { credentialId: process.env.VAPI_ELEVENLABS_CREDENTIAL_ID }
         : {}),
     }
+  }
+
+  // Inject prior call history by overriding the assistant's system prompt for this call only.
+  // The override already contains the base prompt — Vapi replaces {{variables}} in it normally.
+  if (systemPromptOverride) {
+    assistantOverrides.model = { systemPrompt: systemPromptOverride }
   }
 
   const payload = {

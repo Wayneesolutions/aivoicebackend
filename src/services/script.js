@@ -2,23 +2,39 @@
 // Converts the client's plain-English script into a full LLM system prompt
 
 const LANGUAGE_NAMES = {
-  en: 'English', hi: 'Hindi', es: 'Spanish', fr: 'French', de: 'German',
+  en: 'English', hi: 'Hindi', hinglish: 'Hinglish', pa: 'Punjabi',
+  es: 'Spanish', fr: 'French', de: 'German',
   pt: 'Portuguese', ar: 'Arabic', zh: 'Mandarin Chinese', ja: 'Japanese',
   ko: 'Korean', ru: 'Russian', it: 'Italian', nl: 'Dutch', tr: 'Turkish', pl: 'Polish'
 }
 
 // Per-language style instructions — tuned for natural human speech
 const LANGUAGE_STYLE = {
-  hi: `━━━━ LANGUAGE STYLE (CRITICAL — READ FIRST) ━━━━
+  hi: `━━━━ LANGUAGE (CRITICAL — READ FIRST) ━━━━
+Speak in pure Hindi (हिन्दी) throughout the entire call.
+- Use proper Hindi words and grammar — write in Devanagari script mentally, speak naturally.
+- Keep English only for proper nouns: company names, product names, and numbers.
+- Example: "नमस्ते, क्या मैं [prospect_name] जी से बात कर सकता हूँ? मेरा नाम [agent] है।"
+- Example: "हमारी सेवाएँ आपकी कंपनी को बहुत फायदा पहुँचा सकती हैं।"`,
+
+  hinglish: `━━━━ LANGUAGE STYLE (CRITICAL — READ FIRST) ━━━━
 Speak in natural HINGLISH — the way educated Indians actually talk on phone calls.
 This means: Hindi sentence structure and flow, but freely mix in English words wherever they feel natural.
 RULES:
 - Use English for: business terms (meeting, call, software, solution, team, project, budget, demo, proposal), numbers, company names, product names, tech words.
-- Use Hindi for: conversational connectors (toh, aur, matlab, bas, theek hai, bilkul, suno, dekho, actually), greetings, transitions, emotions.
+- Use Hindi for: conversational connectors (toh, aur, matlab, bas, theek hai, bilkul, suno, dekho), greetings, transitions, emotions.
 - Example: "Toh basically humara solution aapki team ko help karta hai apna efficiency improve karne mein."
 - Example: "Aapke paas koi 15 minutes hain ek quick call ke liye?"
-- NEVER use formal pure Hindi words like "उपाय", "सेवाएँ", "प्रस्तुत" — use their natural Hinglish equivalents.
-- Match the prospect's language style — if they speak more English, lean more English. If more Hindi, lean more Hindi.`,
+- NEVER use overly formal pure Hindi — keep it natural and conversational.
+- Match the prospect's style — if they speak more English, lean more English. If more Hindi, lean more Hindi.`,
+
+  pa: `━━━━ LANGUAGE (CRITICAL — READ FIRST) ━━━━
+Speak in natural conversational Punjabi (ਪੰਜਾਬੀ) throughout the call.
+- Use warm, friendly Punjabi the way it is spoken in Punjab and by the Punjabi diaspora.
+- Mix in English words naturally for business and tech terms (meeting, call, software, demo, budget).
+- Example: "ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕੀ ਮੈਂ [prospect] ਜੀ ਨਾਲ ਗੱਲ ਕਰ ਸਕਦਾ ਹਾਂ?"
+- Example: "ਸਾਡਾ solution ਤੁਹਾਡੇ business ਲਈ ਬਹੁਤ ਵਧੀਆ ਹੈ।"
+- Be warm and respectful — Punjabi culture values directness with warmth.`,
 
   es: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational Spanish. Use Latin American Spanish tone — warm and direct. English technical terms (software, email, meeting) are fine to keep in English.`,
   fr: `━━━━ LANGUAGE (CRITICAL) ━━━━\nSpeak in natural conversational French. Keep technical English terms as-is. Be warm and professional.`,

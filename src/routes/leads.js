@@ -2,20 +2,24 @@
 const router = require('express').Router()
 const multer = require('multer')
 const { parse } = require('csv-parse/sync')
-const { PrismaClient } = require('@prisma/client')
+const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
-const prisma = new PrismaClient()
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } })
 
 // GET /api/leads — tenant's leads with filters
 router.get('/', requireTenantUser, async (req, res, next) => {
   try {
-    const { status, campaignId, page = 1, limit = 50 } = req.query
+    const { status, campaignId, unassigned, page = 1, limit = 50 } = req.query
     const where = { tenantId: req.tenant.id }
-    if (status)     where.status     = status
-    if (campaignId) where.campaignId = campaignId
+    if (status)               where.status     = status
+    if (campaignId)           where.campaignId = campaignId
+    if (unassigned === 'true') {
+      where.campaignId  = null
+      where.isOptedOut  = false
+      where.status      = 'PENDING'
+    }
 
     const [leads, total] = await Promise.all([
       prisma.lead.findMany({

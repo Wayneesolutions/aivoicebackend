@@ -3,10 +3,9 @@
 const express = require('express')
 const router  = express.Router()
 const Stripe  = require('stripe')
-const { PrismaClient } = require('@prisma/client')
+const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 
-const prisma = new PrismaClient()
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY)
 
 // ── POST /api/stripe/setup-intent ────────────────────────────────────────────
@@ -20,13 +19,21 @@ router.post('/setup-intent', requireTenantOwner, async (req, res, next) => {
     if (!customerId) {
       const customer = await stripe.customers.create({
         name:  tenant.name,
-        email: req.user.email,
-        metadata: { tenantId: tenant.id }
+        email: tenant.ownerEmail || req.user.email,
+        description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+        metadata: { tenantId: tenant.id, ownerName: tenant.ownerName || '', ownerEmail: tenant.ownerEmail || '' }
       })
       customerId = customer.id
       await prisma.tenant.update({
         where: { id: tenant.id },
         data:  { stripeCustomerId: customerId }
+      })
+    } else {
+      // Keep customer details up to date
+      await stripe.customers.update(customerId, {
+        name:  tenant.name,
+        email: tenant.ownerEmail || req.user.email,
+        metadata: { tenantId: tenant.id, ownerName: tenant.ownerName || '', ownerEmail: tenant.ownerEmail || '' }
       })
     }
 
@@ -67,6 +74,37 @@ router.get('/payment-method', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// ── POST /api/stripe/set-default-payment-method ──────────────────────────────
+// Sets the newly-confirmed card as the customer default and detaches old ones.
+// Called by the frontend immediately after stripe.confirmCardSetup() succeeds.
+router.post('/set-default-payment-method', requireTenantOwner, async (req, res, next) => {
+  try {
+    const { paymentMethodId } = req.body
+    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' })
+
+    const tenant = await prisma.tenant.findUnique({ where: { id: req.tenant.id } })
+    if (!tenant.stripeCustomerId) return res.status(400).json({ error: 'No Stripe customer found' })
+
+    // Set as the default for all future invoices
+    await stripe.customers.update(tenant.stripeCustomerId, {
+      invoice_settings: { default_payment_method: paymentMethodId }
+    })
+
+    // Detach every other card so there's no accumulation
+    const methods = await stripe.paymentMethods.list({
+      customer: tenant.stripeCustomerId,
+      type: 'card',
+    })
+    await Promise.all(
+      methods.data
+        .filter(pm => pm.id !== paymentMethodId)
+        .map(pm => stripe.paymentMethods.detach(pm.id))
+    )
+
+    res.json({ ok: true })
+  } catch (err) { next(err) }
+})
+
 // ── POST /api/stripe/invoice ─────────────────────────────────────────────────
 // Creates and finalises a Stripe invoice for unbilled usage in a given month.
 // Called manually by admin or by a monthly cron.
@@ -95,18 +133,44 @@ router.post('/invoice', requireTenantOwner, async (req, res, next) => {
       return res.json({ message: 'No usage to invoice for this period.' })
     }
 
-    // Create invoice item then finalise
+    const [year2, mo2] = (month || new Date().toISOString().slice(0, 7)).split('-').map(Number)
+    const periodLabel = new Date(year2, mo2 - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    const planLabel   = tenant.plan ? tenant.plan.name : 'Pay-as-you-go'
+    const minutes     = agg._sum.minutes?.toFixed(1) || '0.0'
+
+    // Ensure Stripe customer has latest company details
+    await stripe.customers.update(tenant.stripeCustomerId, {
+      name:  tenant.name,
+      email: tenant.ownerEmail,
+      description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+      metadata: { tenantId: tenant.id }
+    })
+
+    // Create invoice item with billing period
     await stripe.invoiceItems.create({
       customer:    tenant.stripeCustomerId,
       amount:      totalAmount,
       currency:    'usd',
-      description: `VoCallM usage — ${agg._sum.minutes?.toFixed(1)} min @ $${tenant.ratePerMinute}/min (${month})`
+      description: `AI Calling — ${minutes} minutes @ $${parseFloat(tenant.ratePerMinute).toFixed(2)}/min`,
+      period: {
+        start: Math.floor(from.getTime() / 1000),
+        end:   Math.floor(to.getTime()   / 1000),
+      }
     })
 
     const invoice = await stripe.invoices.create({
-      customer:         tenant.stripeCustomerId,
-      auto_advance:     true,
+      customer:          tenant.stripeCustomerId,
+      auto_advance:      true,
       collection_method: 'charge_automatically',
+      description:       `VoCallM AI Calling — ${periodLabel}`,
+      custom_fields: [
+        { name: 'Plan',           value: planLabel },
+        { name: 'Billing period', value: periodLabel },
+        { name: 'Minutes used',   value: `${minutes} min` },
+        { name: 'Rate',           value: `$${parseFloat(tenant.ratePerMinute).toFixed(2)}/min` },
+      ],
+      footer: 'VoCallM by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
+      metadata: { tenantId: tenant.id, month: month || new Date().toISOString().slice(0, 7) }
     })
 
     const finalised = await stripe.invoices.finalizeInvoice(invoice.id)
@@ -173,11 +237,18 @@ router.post('/checkout', requireTenantOwner, async (req, res, next) => {
     if (!customerId) {
       const customer = await stripe.customers.create({
         name:  tenant.name,
-        email: req.user.email,
-        metadata: { tenantId: tenant.id }
+        email: tenant.ownerEmail || req.user.email,
+        description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+        metadata: { tenantId: tenant.id, ownerName: tenant.ownerName || '', ownerEmail: tenant.ownerEmail || '' }
       })
       customerId = customer.id
       await prisma.tenant.update({ where: { id: tenant.id }, data: { stripeCustomerId: customerId } })
+    } else {
+      await stripe.customers.update(customerId, {
+        name:  tenant.name,
+        email: tenant.ownerEmail || req.user.email,
+        metadata: { tenantId: tenant.id, ownerName: tenant.ownerName || '', ownerEmail: tenant.ownerEmail || '' }
+      })
     }
 
     // Get or create Stripe Price (cached on plan.stripePriceId to avoid duplicates)
@@ -198,22 +269,31 @@ router.post('/checkout', requireTenantOwner, async (req, res, next) => {
     }
 
     // Redirect back to billing page after checkout
-    const origin = req.headers.origin || process.env.FRONTEND_ADMIN_URL || 'http://localhost:8080'
+    const origin = process.env.FRONTEND_CLIENT_URL || 'http://localhost:8080'
 
-    // If tenant already has a subscription, use subscription update instead
+    // Block mid-cycle plan changes — lock as long as an active subscription exists
     if (tenant.stripeSubscriptionId) {
-      const sub = await stripe.subscriptions.retrieve(tenant.stripeSubscriptionId)
-      await stripe.subscriptions.update(tenant.stripeSubscriptionId, {
-        items: [{ id: sub.items.data[0].id, price: priceId }],
-        metadata: { tenantId: tenant.id, planId: plan.id },
-        proration_behavior: 'always_invoice',
-      })
-      // Assign plan immediately on upgrade
+      const expiresAt = tenant.planExpiresAt ? new Date(tenant.planExpiresAt) : null
+      const isExpired = expiresAt ? expiresAt < new Date() : false
+
+      if (!isExpired) {
+        // Allow re-subscribing to the SAME plan (idempotent)
+        if (tenant.planId === plan.id) {
+          return res.json({ alreadyActive: true })
+        }
+        return res.status(400).json({
+          error: 'Plan change not allowed mid-cycle',
+          planExpiresAt: tenant.planExpiresAt,
+          code: 'MID_CYCLE_CHANGE'
+        })
+      }
+
+      // Subscription period has ended — cancel old subscription and start fresh
+      await stripe.subscriptions.cancel(tenant.stripeSubscriptionId)
       await prisma.tenant.update({
         where: { id: tenant.id },
-        data: { planId: plan.id, ratePerMinute: plan.price }
+        data: { stripeSubscriptionId: null, planId: null, planExpiresAt: null }
       })
-      return res.json({ upgraded: true })
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -222,9 +302,10 @@ router.post('/checkout', requireTenantOwner, async (req, res, next) => {
       line_items: [{ price: priceId, quantity: 1 }],
       metadata:   { tenantId: tenant.id, planId: plan.id },
       subscription_data: {
-        metadata: { tenantId: tenant.id, planId: plan.id }
+        metadata:    { tenantId: tenant.id, planId: plan.id },
+        description: `VoCallM ${plan.name} Plan — ${tenant.name}`,
       },
-      success_url: `${origin}/portal/billing?checkout=success`,
+      success_url: `${origin}/checkout/success`,
       cancel_url:  `${origin}/portal/billing?checkout=cancelled`,
       allow_promotion_codes: true,
       billing_address_collection: 'auto',
@@ -256,8 +337,17 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const { tenantId, planId } = session.metadata || {}
         if (!tenantId || !planId) break
 
-        const plan = await prisma.plan.findUnique({ where: { id: planId } })
+        const [plan, subscription] = await Promise.all([
+          prisma.plan.findUnique({ where: { id: planId } }),
+          stripe.subscriptions.retrieve(session.subscription)
+        ])
         if (!plan) break
+
+        // current_period_end can be null on some Stripe test subscriptions — fall back to 30 days
+        const periodEnd = subscription.current_period_end
+        const planExpiresAt = periodEnd
+          ? new Date(periodEnd * 1000)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
 
         await prisma.tenant.update({
           where: { id: tenantId },
@@ -266,23 +356,61 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
             ratePerMinute:        plan.price,
             stripeCustomerId:     session.customer,
             stripeSubscriptionId: session.subscription,
+            planExpiresAt,
           }
         })
-        console.log(`[stripe] Plan "${plan.name}" activated for tenant ${tenantId}`)
+        console.log(`[stripe] Plan "${plan.name}" activated for tenant ${tenantId} — expires ${planExpiresAt.toISOString()}`)
         break
       }
 
-      // ── Subscription invoice paid — log it ──────────────────────────────────
+      // ── Subscription invoice created — add branding before finalization ───────
+      case 'invoice.created': {
+        const inv = event.data.object
+        // Only customize subscription invoices (not manual one-off invoices)
+        if (!inv.subscription || inv.status !== 'draft') break
+
+        const tenant = await prisma.tenant.findFirst({
+          where: { stripeSubscriptionId: inv.subscription },
+          include: { plan: true }
+        })
+        if (!tenant) break
+
+        try {
+          await stripe.invoices.update(inv.id, {
+            description: `VoCallM ${tenant.plan?.name || 'Plan'} — ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`,
+            custom_fields: [
+              { name: 'Plan',   value: tenant.plan?.name || 'Subscription' },
+              { name: 'Client', value: tenant.name },
+            ],
+            footer: 'VoCallM by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
+          })
+        } catch (e) {
+          console.error('[stripe] Could not update draft invoice:', e.message)
+        }
+        break
+      }
+
+      // ── Subscription invoice paid — renew plan expiry ───────────────────────
       case 'invoice.paid': {
         const inv = event.data.object
-        // Only subscription invoices (not our manual usage ones)
         if (!inv.subscription) break
         const tenant = await prisma.tenant.findFirst({
           where: { stripeSubscriptionId: inv.subscription }
         })
-        if (tenant) {
-          console.log(`[stripe] Subscription invoice paid — tenant ${tenant.id}, $${inv.amount_paid / 100}`)
-        }
+        if (!tenant) break
+
+        // Fetch the subscription to get the new period end
+        const subscription = await stripe.subscriptions.retrieve(inv.subscription)
+        const renewEnd = subscription.current_period_end
+        const planExpiresAt = renewEnd
+          ? new Date(renewEnd * 1000)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+
+        await prisma.tenant.update({
+          where: { id: tenant.id },
+          data: { planExpiresAt }
+        })
+        console.log(`[stripe] Subscription renewed — tenant ${tenant.id}, new expiry ${planExpiresAt.toISOString()}, $${inv.amount_paid / 100}`)
         break
       }
 
@@ -303,7 +431,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         break
       }
 
-      // ── Subscription cancelled ───────────────────────────────────────────────
+      // ── Subscription cancelled — remove plan immediately ─────────────────────
       case 'customer.subscription.deleted': {
         const sub = event.data.object
         const tenant = await prisma.tenant.findFirst({
@@ -312,9 +440,13 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         if (tenant) {
           await prisma.tenant.update({
             where: { id: tenant.id },
-            data: { planId: null, stripeSubscriptionId: null }
+            data: { planId: null, stripeSubscriptionId: null, planExpiresAt: null }
           })
-          console.log(`[stripe] Subscription cancelled for tenant ${tenant.id}`)
+          await prisma.campaign.updateMany({
+            where: { tenantId: tenant.id, status: 'ACTIVE' },
+            data:  { status: 'PAUSED' }
+          })
+          console.log(`[stripe] Subscription cancelled for tenant ${tenant.id} — plan removed`)
         }
         break
       }

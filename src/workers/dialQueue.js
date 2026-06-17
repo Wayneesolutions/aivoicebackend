@@ -1,7 +1,7 @@
 // backend/src/workers/dialQueue.js
 // Bull-backed dial queue — replaces the fragile setInterval approach.
 // Jobs survive server restarts. Concurrency is enforced by Bull, not in-memory counters.
-const { Queue, Worker, QueueScheduler } = require('bullmq')
+const { Queue, Worker } = require('bullmq')
 const { PrismaClient } = require('@prisma/client')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
 const vapiService = require('../services/vapi')
@@ -77,15 +77,48 @@ async function runScheduler(campaignId = null) {
       continue
     }
 
+    // Mark leads that hit maxAttempts as EXHAUSTED so they stop being dialed
+    await prisma.lead.updateMany({
+      where: {
+        campaignId: campaign.id,
+        callAttempts: { gte: campaign.maxAttempts },
+        isOptedOut: false,
+        status: { in: ['PENDING', 'NO_ANSWER', 'VOICEMAIL', 'CALLBACK'] }
+      },
+      data: { status: 'EXHAUSTED' }
+    })
+
+    const retryThreshold = new Date(now - campaign.retryAfterHours * 60 * 60 * 1000)
+
     const leads = await prisma.lead.findMany({
       where: {
         campaignId: campaign.id,
-        status: { in: ['PENDING', 'NO_ANSWER', 'VOICEMAIL'] },
         isOptedOut: false,
         callAttempts: { lt: campaign.maxAttempts },
         OR: [
-          { lastCalledAt: null },
-          { lastCalledAt: { lte: new Date(now - campaign.retryAfterHours * 60 * 60 * 1000) } }
+          {
+            // Regular leads: retry once the configured window has elapsed
+            status: { in: ['PENDING', 'NO_ANSWER', 'VOICEMAIL'] },
+            OR: [
+              { lastCalledAt: null },
+              { lastCalledAt: { lte: retryThreshold } }
+            ]
+          },
+          {
+            // Callback leads: honor the prospect's requested time.
+            // If no specific time was captured, fall back to retryAfterHours.
+            status: 'CALLBACK',
+            OR: [
+              { callbackAt: { lte: now } },
+              {
+                callbackAt: null,
+                OR: [
+                  { lastCalledAt: null },
+                  { lastCalledAt: { lte: retryThreshold } }
+                ]
+              }
+            ]
+          }
         ]
       },
       take: 50
@@ -143,6 +176,13 @@ async function dialLead(job) {
     return
   }
 
+  // Fetch prior completed calls for this lead so the AI can reference them
+  const priorCalls = await prisma.call.findMany({
+    where: { leadId, status: 'COMPLETED', summary: { not: null } },
+    orderBy: { endedAt: 'asc' },
+    select: { endedAt: true, summary: true }
+  })
+
   const callRecord = await prisma.call.create({
     data: {
       tenantId, leadId, campaignId,
@@ -152,9 +192,50 @@ async function dialLead(job) {
     }
   })
 
+  // Build a system prompt override for follow-up calls that includes prior call history.
+  // Wrapped in try/catch so a DB or parse failure never blocks the call itself.
+  let systemPromptOverride = null
+  if (priorCalls.length > 0) {
+    try {
+      const campaign = await prisma.campaign.findUnique({
+        where: { id: campaignId },
+        select: { script: { select: { compiledPrompt: true } } }
+      })
+      const meta = JSON.parse(campaign?.script?.compiledPrompt || '{}')
+      const basePrompt = meta.prompt || ''
+
+      if (basePrompt) {
+        const historyLines = priorCalls.map((c, i) => {
+          const date = c.endedAt
+            ? c.endedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+            : 'unknown date'
+          return `Call ${i + 1} (${date}): ${c.summary}`
+        }).join('\n')
+
+        const contextBlock = `━━━━ PRIOR CALL HISTORY — READ BEFORE STARTING ━━━━
+You have called {{prospect_name}} before. Here is what happened on previous calls:
+
+${historyLines}
+
+INSTRUCTIONS FOR THIS FOLLOW-UP:
+- Open by acknowledging you've spoken before: "Hi {{prospect_name}}, we spoke previously — just wanted to follow up."
+- Reference what was discussed to show continuity. Do NOT deliver the same pitch again.
+- Build on the previous conversation — move it forward.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+`
+        systemPromptOverride = contextBlock + basePrompt
+        console.log(`[dialQueue] Lead ${leadId} — injecting ${priorCalls.length} prior call(s) into system prompt`)
+      }
+    } catch (err) {
+      console.error(`[dialQueue] Could not build call history context for lead ${leadId}:`, err.message)
+    }
+  }
+
   const vapiCall = await vapiService.startOutboundCall({
     toNumber, vapiNumberId, vapiAssistantId,
     voiceOverrideId: clonedVoiceId || undefined,
+    systemPromptOverride,
     metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
   })
 

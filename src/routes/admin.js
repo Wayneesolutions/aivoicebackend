@@ -1,14 +1,14 @@
 // backend/src/routes/admin.js
-// All routes here require super admin auth (Wayne Solutions team only)
+// All routes here require super admin auth (Wayne E Solutions team only)
 const router = require('express').Router()
 const bcrypt = require('bcryptjs')
 const path   = require('path')
 const multer = require('multer')
-const { PrismaClient } = require('@prisma/client')
+const prisma = require('../lib/prisma')
 const { requireAdmin } = require('../middleware/auth')
 const vapiService  = require('../services/vapi')
 const storageService = require('../services/storage')
-const prisma = new PrismaClient()
+const { sendClientWelcome } = require('../services/email')
 
 // Multer memory storage — file sent to S3 or disk via storageService
 const logoUpload = multer({
@@ -162,6 +162,18 @@ router.post('/tenants', async (req, res, next) => {
     if (!name || !slug || !ownerEmail || !ownerPassword)
       return res.status(400).json({ error: 'name, slug, ownerEmail, ownerPassword required' })
 
+    // Check for duplicate email or slug before attempting create
+    const [emailTaken, slugTaken] = await Promise.all([
+      prisma.tenant.findUnique({ where: { ownerEmail } }),
+      prisma.tenant.findUnique({ where: { slug } }),
+    ])
+    if (emailTaken) return res.status(409).json({ error: `A client with email "${ownerEmail}" already exists.` })
+    if (slugTaken)  return res.status(409).json({ error: `The slug "${slug}" is already in use. Choose a different one.` })
+
+    // Also check the TenantUser table (self-registered users share the same email pool)
+    const userTaken = await prisma.tenantUser.findFirst({ where: { email: ownerEmail } })
+    if (userTaken) return res.status(409).json({ error: `A user with email "${ownerEmail}" already exists.` })
+
     const passwordHash = await bcrypt.hash(ownerPassword, 12)
 
     const tenant = await prisma.tenant.create({
@@ -183,6 +195,11 @@ router.post('/tenants', async (req, res, next) => {
       },
       include: { users: true }
     })
+
+    // Send welcome email with credentials (non-blocking — don't fail creation if email fails)
+    sendClientWelcome(ownerEmail, ownerName || name, name, ownerPassword).catch(e =>
+      console.error('[email] Failed to send client welcome:', e.message)
+    )
 
     res.status(201).json(tenant)
   } catch (err) { next(err) }
@@ -449,28 +466,82 @@ router.get('/billing/summary', async (req, res, next) => {
   try {
     const { month } = req.query  // "2026-06"
     const start = month ? new Date(`${month}-01`) : startOfMonth()
-    const end = month ? new Date(new Date(`${month}-01`).setMonth(new Date(`${month}-01`).getMonth() + 1)) : new Date()
+    const end   = month
+      ? new Date(new Date(`${month}-01`).setMonth(new Date(`${month}-01`).getMonth() + 1))
+      : new Date()
 
-    const summary = await prisma.usageLog.groupBy({
+    // Usage logs for the period
+    const usage = await prisma.usageLog.groupBy({
       by: ['tenantId'],
       where: { createdAt: { gte: start, lt: end } },
       _sum: { minutes: true, amount: true }
     })
+    const usageMap = Object.fromEntries(usage.map(s => [s.tenantId, s]))
+    const usageTenantIds = usage.map(s => s.tenantId)
 
-    const tenantIds = summary.map(s => s.tenantId)
+    // Include tenants with active paid subscriptions even if they had no calls this month
     const tenants = await prisma.tenant.findMany({
-      where: { id: { in: tenantIds } },
-      select: { id: true, name: true, ratePerMinute: true, stripeCustomerId: true, plan: { select: { id: true, name: true } } }
+      where: {
+        OR: [
+          { id: { in: usageTenantIds } },
+          { stripeSubscriptionId: { not: null } }
+        ]
+      },
+      select: {
+        id: true, name: true, ratePerMinute: true,
+        stripeCustomerId: true, stripeSubscriptionId: true,
+        planExpiresAt: true,
+        plan: { select: { id: true, name: true, price: true, minutesIncluded: true } }
+      }
     })
 
-    const tenantMap = Object.fromEntries(tenants.map(t => [t.id, t]))
-    const result = summary.map(s => ({
-      tenant: tenantMap[s.tenantId],
-      totalMinutes: s._sum.minutes,
-      totalRevenue: s._sum.amount,
-      platformCost: s._sum.minutes * parseFloat(process.env.PLATFORM_COST_PER_MINUTE || 0.12),
-      grossProfit: s._sum.amount - (s._sum.minutes * parseFloat(process.env.PLATFORM_COST_PER_MINUTE || 0.12))
-    }))
+    const costPerMin = parseFloat(process.env.PLATFORM_COST_PER_MINUTE || '0.12')
+
+    const result = tenants.map(tenant => {
+      const u = usageMap[tenant.id]
+      const totalMinutes  = u?._sum.minutes || 0
+      const usageRevenue  = u?._sum.amount  || 0
+
+      // Subscription revenue = plan price if the subscription was active during this period
+      // A subscription is "active for this month" if stripeSubscriptionId is set and
+      // planExpiresAt is either null (never expires) or falls after the period start
+      const subscriptionActive =
+        !!tenant.stripeSubscriptionId &&
+        !!tenant.plan &&
+        (tenant.plan.price || 0) > 0 &&
+        (!tenant.planExpiresAt || new Date(tenant.planExpiresAt) > start)
+
+      const subscriptionRevenue = subscriptionActive ? (tenant.plan.price || 0) : 0
+      const totalRevenue  = usageRevenue + subscriptionRevenue
+      const platformCost  = totalMinutes * costPerMin
+      const grossProfit   = totalRevenue - platformCost
+
+      return {
+        tenant: {
+          id: tenant.id,
+          name: tenant.name,
+          ratePerMinute: tenant.ratePerMinute,
+          stripeCustomerId: tenant.stripeCustomerId,
+          stripeSubscriptionId: tenant.stripeSubscriptionId || null,
+          planExpiresAt: tenant.planExpiresAt || null,
+          plan: tenant.plan ? {
+            id: tenant.plan.id,
+            name: tenant.plan.name,
+            price: tenant.plan.price,
+            minutesIncluded: tenant.plan.minutesIncluded,
+          } : null
+        },
+        totalMinutes,
+        usageRevenue,
+        subscriptionRevenue,
+        totalRevenue,
+        platformCost,
+        grossProfit
+      }
+    })
+
+    // Sort: most revenue first
+    result.sort((a, b) => b.totalRevenue - a.totalRevenue)
 
     res.json(result)
   } catch (err) { next(err) }
@@ -511,22 +582,42 @@ router.post('/billing/invoice', async (req, res, next) => {
       return res.status(400).json({ error: 'No usage to invoice for this period' })
     }
 
-    const monthLabel = new Date(year, mo - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
-    const planLabel  = tenant.plan ? ` (${tenant.plan.name} plan)` : ''
-    const desc = `VoCallM — ${monthLabel}${planLabel}: ${totalMinutes.toFixed(1)} min @ $${tenant.ratePerMinute}/min`
+    const periodLabel = new Date(year, mo - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    const planLabel   = tenant.plan ? tenant.plan.name : 'Pay-as-you-go'
+    const desc = `AI Calling — ${totalMinutes.toFixed(1)} min @ $${parseFloat(tenant.ratePerMinute).toFixed(2)}/min (${periodLabel})`
+
+    // Ensure Stripe customer reflects current company details
+    await stripe.customers.update(tenant.stripeCustomerId, {
+      name:        tenant.name,
+      email:       tenant.ownerEmail,
+      description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+      metadata:    { tenantId: tenant.id }
+    })
 
     await stripe.invoiceItems.create({
       customer:    tenant.stripeCustomerId,
       amount:      totalAmount,
       currency:    'usd',
       description: desc,
+      period: {
+        start: Math.floor(from.getTime() / 1000),
+        end:   Math.floor(to.getTime()   / 1000),
+      }
     })
 
     const invoice = await stripe.invoices.create({
       customer:          tenant.stripeCustomerId,
       auto_advance:      true,
       collection_method: 'charge_automatically',
-      description:       `VoCallM usage — ${monthLabel}`,
+      description:       `VoCallM AI Calling — ${periodLabel}`,
+      custom_fields: [
+        { name: 'Plan',           value: planLabel },
+        { name: 'Billing period', value: periodLabel },
+        { name: 'Minutes used',   value: `${totalMinutes.toFixed(1)} min` },
+        { name: 'Rate',           value: `$${parseFloat(tenant.ratePerMinute).toFixed(2)}/min` },
+      ],
+      footer: 'VoCallM by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
+      metadata: { tenantId, month: billMonth }
     })
 
     const finalised = await stripe.invoices.finalizeInvoice(invoice.id)
