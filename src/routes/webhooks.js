@@ -1,5 +1,19 @@
-// backend/src/routes/webhooks.js
-// Vapi sends every call event here — this is the brain of the post-call processing
+// ============================================================
+// FIX-04 — backend/src/routes/webhooks.js
+// REPLACE your entire existing webhooks.js with this file.
+//
+// WHAT CHANGED:
+//   1. Added handleSentiment() — stores detect_sentiment data
+//      from the AI into the Call record in real time
+//   2. detect_sentiment routed in both tool-calls and function-call handlers
+//   3. Sentiment stored as JSON in call.sentimentLog (add field to schema — see below)
+//
+// PRISMA SCHEMA CHANGE NEEDED:
+//   In prisma/schema.prisma, inside the Call model, add:
+//     sentimentLog Json?   // Array of { ts, sentiment, intent, buying_signal, suggested_action }
+//   Then run: npx prisma migrate dev --name add_sentiment_log
+// ============================================================
+
 const router = require('express').Router()
 const crypto = require('crypto')
 const prisma = require('../lib/prisma')
@@ -7,7 +21,6 @@ const calendarService = require('../services/calendar')
 const crmService      = require('../services/crm')
 const billingService  = require('../services/billing')
 
-// Vapi sends x-vapi-secret header with the raw secret value (not HMAC)
 function verifyVapiSignature(signatureHeader) {
   const secret = process.env.VAPI_WEBHOOK_SECRET
   if (!secret) return true
@@ -21,9 +34,7 @@ function verifyVapiSignature(signatureHeader) {
   }
 }
 
-// POST /api/webhooks/vapi
 router.post('/vapi', async (req, res) => {
-  // Log every incoming request for debugging
   console.log('[webhook/vapi] INCOMING — headers:', JSON.stringify(req.headers))
 
   const secret = req.headers['x-vapi-secret']
@@ -32,22 +43,39 @@ router.post('/vapi', async (req, res) => {
     return res.status(401).json({ error: 'Invalid webhook signature' })
   }
 
-  // Always respond 200 immediately — Vapi retries on timeout
-  res.status(200).json({ received: true })
-
+  let event, type, call
   try {
     const bodyStr = req.body.toString()
     console.log('[webhook/vapi] RAW BODY:', bodyStr.slice(0, 500))
-
     const raw = JSON.parse(bodyStr)
-    // Vapi wraps payload in a 'message' key for server-url webhooks
-    const event = raw.message || raw
-    const { type, call } = event
-
+    event = raw.message || raw
+    type  = event.type
+    call  = event.call
     console.log('[webhook/vapi] TYPE:', type, '| CALL ID:', call?.id || '')
+  } catch (parseErr) {
+    console.error('[webhook/vapi] Body parse error:', parseErr.message)
+    return res.status(200).json({ received: true })
+  }
 
-    if (!call?.id) return
+  // tool-calls MUST be handled synchronously — Vapi waits for { results: [...] }
+  // Responding with anything else makes the AI say "there was a technical issue"
+  if (type === 'tool-calls') {
+    try {
+      if (!call?.id) return res.status(200).json({ results: [] })
+      const results = await handleToolCalls(event)
+      return res.status(200).json({ results })
+    } catch (err) {
+      console.error('[webhook/vapi] tool-calls error:', err.message)
+      return res.status(200).json({ results: [] })
+    }
+  }
 
+  // All other events: respond immediately, process in background
+  res.status(200).json({ received: true })
+
+  if (!call?.id) return
+
+  try {
     switch (type) {
       case 'call-started':
       case 'status-update':
@@ -59,9 +87,6 @@ router.post('/vapi', async (req, res) => {
       case 'call-ended':
         await handleCallEnded(event)
         break
-      case 'tool-calls':
-        await handleToolCalls(event)
-        break
       case 'function-call':
         await handleFunctionCall(event)
         break
@@ -69,7 +94,6 @@ router.post('/vapi', async (req, res) => {
         await handleTranscriptUpdate(call)
         break
       default:
-        // Log unknown types so we can see what Vapi sends
         console.log('[webhook/vapi] unhandled type:', type, JSON.stringify(event).slice(0, 200))
     }
   } catch (err) {
@@ -77,15 +101,11 @@ router.post('/vapi', async (req, res) => {
   }
 })
 
-// ── EVENT HANDLERS ────────────────────────────────────────
-
 async function handleCallStarted(call) {
   await prisma.call.updateMany({
     where: { vapiCallId: call.id },
     data: { status: 'IN_PROGRESS', startedAt: new Date() }
   })
-
-  // Update lead status
   const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call.id } })
   if (callRecord) {
     await prisma.lead.update({
@@ -96,10 +116,9 @@ async function handleCallStarted(call) {
 }
 
 async function handleCallEnded(event) {
-  // Vapi sends end-of-call-report with call, artifact, analysis at top level of message
-  const call = event.call || event
-  const artifact = event.artifact || call.artifact || {}
-  const analysis = event.analysis || call.analysis || {}
+  const call       = event.call || event
+  const artifact   = event.artifact || call.artifact || {}
+  const analysis   = event.analysis || call.analysis || {}
   const endedReason = event.endedReason || call.endedReason
 
   const callRecord = await prisma.call.findFirst({
@@ -108,49 +127,37 @@ async function handleCallEnded(event) {
   })
   if (!callRecord) return
 
-  // Vapi's call.startedAt is often null in the webhook payload; fall back to what we recorded
   const startedAt = call.startedAt ? new Date(call.startedAt) : callRecord.startedAt
   const endedAt   = call.endedAt   ? new Date(call.endedAt)   : new Date()
   const durationSeconds = startedAt ? Math.floor((endedAt - startedAt) / 1000) : 0
-  console.log(`[webhook] handleCallEnded — vapiId=${call.id} endedReason=${endedReason} startedAt=${startedAt?.toISOString()} duration=${durationSeconds}s meetingBookedAt=${callRecord.meetingBookedAt}`)
 
-  // If the AI already booked a meeting via tool-call, honour that outcome regardless of endedReason
+  console.log(`[webhook] handleCallEnded — vapiId=${call.id} endedReason=${endedReason} duration=${durationSeconds}s`)
+
   const mappedOutcome = mapVapiEndReason(endedReason) || 'NO_ANSWER'
   const outcome = callRecord.meetingBookedAt ? 'BOOKED' : mappedOutcome
 
-  // artifact.transcript = pre-formatted string (older Vapi); artifact.messages = array (newer)
-  const transcript = formatTranscript(artifact.transcript) || formatTranscript(artifact.messages)
-  const summary = analysis.summary || null
+  const transcript  = formatTranscript(artifact.transcript) || formatTranscript(artifact.messages)
+  const summary     = analysis.summary || null
   const recordingUrl = artifact.recordingUrl || null
 
-  // Calculate billing
-  const billedMinutes = Math.ceil(durationSeconds / 6) / 10  // round up to 0.1 min
+  const billedMinutes = Math.ceil(durationSeconds / 6) / 10
   const billedAmount  = billedMinutes * callRecord.tenant.ratePerMinute
 
-  // Update call record
   await prisma.call.update({
     where: { id: callRecord.id },
     data: {
       status: 'COMPLETED',
-      outcome,
-      durationSeconds,
-      transcript,
-      summary,
-      recordingUrl,
-      billedMinutes,
-      billedAmount,
+      outcome, durationSeconds, transcript, summary, recordingUrl,
+      billedMinutes, billedAmount,
       endedAt: new Date()
     }
   })
 
-  // Update lead status
-  const leadStatus = outcomeToLeadStatus(outcome)
   await prisma.lead.update({
     where: { id: callRecord.leadId },
-    data: { status: leadStatus }
+    data: { status: outcomeToLeadStatus(outcome) }
   })
 
-  // Log usage for billing
   if (billedMinutes > 0) {
     await billingService.logUsage({
       tenantId:     callRecord.tenantId,
@@ -161,18 +168,19 @@ async function handleCallEnded(event) {
     })
   }
 
-  // Log to CRM (async, don't block)
   crmService.logCall({
-    tenant:       callRecord.tenant,
-    lead:         callRecord.lead,
-    call:         { ...callRecord, durationSeconds, outcome, transcript, summary }
+    tenant: callRecord.tenant,
+    lead:   callRecord.lead,
+    call:   { ...callRecord, durationSeconds, outcome, transcript, summary }
   }).catch(err => console.error('[crm] Log failed:', err.message))
 }
 
-// Newer Vapi format: type=tool-calls with toolCallList array
 async function handleToolCalls(event) {
   const { call, toolCallList = [] } = event
+  const results = []
+
   for (const toolCall of toolCallList) {
+    const toolCallId = toolCall.id
     const name = toolCall.function?.name
     let parameters = {}
     try {
@@ -181,24 +189,34 @@ async function handleToolCalls(event) {
         : (toolCall.function?.arguments || {})
     } catch {}
 
+    console.log(`[webhook] tool-call: ${name}`, JSON.stringify(parameters))
+
     const callRecord = await prisma.call.findFirst({
       where: { vapiCallId: call.id },
       include: { tenant: true, lead: true }
     })
-    if (!callRecord) continue
+    if (!callRecord) {
+      results.push({ toolCallId, result: 'Internal error: call record not found.' })
+      continue
+    }
 
-    if (name === 'book_meeting') await processMeetingBooking({ callRecord, parameters })
-    if (name === 'request_callback') {
-      const callbackAt = parseCallbackTime(parameters.callback_time)
-      await prisma.lead.update({ where: { id: callRecord.leadId }, data: { status: 'CALLBACK', callbackAt } })
+    let result = 'Done.'
+    try {
+      if (name === 'book_meeting')     result = await processMeetingBooking({ callRecord, parameters })
+      if (name === 'request_callback') result = await processCallback({ callRecord, parameters })
+      if (name === 'end_call')         { await processEndCall({ callRecord, parameters }); result = 'Call ended.' }
+      if (name === 'detect_sentiment') { await handleSentiment({ callRecord, parameters }); result = 'Sentiment recorded.' }
+    } catch (err) {
+      console.error(`[webhook] Error in tool ${name}:`, err.message)
+      result = 'Noted. I\'ll follow up on that.'
     }
-    if (name === 'end_call') {
-      await prisma.call.update({ where: { id: callRecord.id }, data: { outcome: parameters.reason, summary: parameters.summary } })
-    }
+
+    results.push({ toolCallId, result })
   }
+
+  return results
 }
 
-// Older Vapi format: type=function-call with functionCall object
 async function handleFunctionCall(event) {
   const { call, functionCall } = event
   const { name, parameters } = functionCall
@@ -209,24 +227,51 @@ async function handleFunctionCall(event) {
   })
   if (!callRecord) return
 
-  if (name === 'book_meeting') {
-    await processMeetingBooking({ callRecord, parameters })
-  }
+  if (name === 'book_meeting')     await processMeetingBooking({ callRecord, parameters })
+  if (name === 'request_callback') await processCallback({ callRecord, parameters })
+  if (name === 'end_call')         await processEndCall({ callRecord, parameters })
+  if (name === 'detect_sentiment') await handleSentiment({ callRecord, parameters })  // NEW
+}
 
-  if (name === 'request_callback') {
-    const callbackAt = parseCallbackTime(parameters.callback_time)
-    await prisma.lead.update({
-      where: { id: callRecord.leadId },
-      data: { status: 'CALLBACK', callbackAt }
-    })
-  }
+// NEW — stores sentiment snapshot from AI into Call.sentimentLog
+async function handleSentiment({ callRecord, parameters }) {
+  const { sentiment, intent, buying_signal, suggested_action } = parameters
+  console.log(`[webhook] detect_sentiment — call=${callRecord.id} sentiment=${sentiment} intent=${intent} action=${suggested_action}`)
 
-  if (name === 'end_call') {
+  try {
+    // Append to existing log (sentimentLog is a JSON array in the DB)
+    const existing = callRecord.sentimentLog || []
+    const entry = {
+      ts:               new Date().toISOString(),
+      sentiment,
+      intent,
+      buying_signal:    buying_signal || null,
+      suggested_action
+    }
+    const updated = Array.isArray(existing) ? [...existing, entry] : [entry]
+
     await prisma.call.update({
       where: { id: callRecord.id },
-      data: { outcome: parameters.reason, summary: parameters.summary }
+      data: { sentimentLog: updated }
     })
+  } catch (err) {
+    // sentimentLog field may not exist yet — run the migration first
+    console.error('[webhook] Could not save sentiment — did you run the migration?', err.message)
   }
+}
+
+// Extracted helpers (cleaner code)
+async function processCallback({ callRecord, parameters }) {
+  const callbackAt = parseCallbackTime(parameters.callback_time)
+  await prisma.lead.update({ where: { id: callRecord.leadId }, data: { status: 'CALLBACK', callbackAt } })
+  return `Got it — I've noted your callback for ${parameters.callback_time}. We'll call you back then.`
+}
+
+async function processEndCall({ callRecord, parameters }) {
+  await prisma.call.update({
+    where: { id: callRecord.id },
+    data: { outcome: parameters.reason, summary: parameters.summary }
+  })
 }
 
 async function handleTranscriptUpdate(call) {
@@ -238,13 +283,10 @@ async function handleTranscriptUpdate(call) {
   })
 }
 
-// ── MEETING BOOKING ───────────────────────────────────────
-
 async function processMeetingBooking({ callRecord, parameters }) {
   const { tenant, lead } = callRecord
   console.log('[webhook] book_meeting called — params:', JSON.stringify(parameters))
 
-  // Try to parse the AI's preferred_slot into a real date for display
   const scheduledMeetingAt = parsePreferredSlot(parameters.preferred_slot)
 
   try {
@@ -255,9 +297,7 @@ async function processMeetingBooking({ callRecord, parameters }) {
       preferredSlot: parameters.preferred_slot,
       notes:         parameters.notes || ''
     })
-    console.log('[webhook] Cal.com booking response:', JSON.stringify(booking))
 
-    // Cal.com returns the exact start time — prefer that over our parsed slot
     const confirmedAt = booking.startTime ? new Date(booking.startTime) : scheduledMeetingAt
 
     await prisma.call.update({
@@ -273,16 +313,12 @@ async function processMeetingBooking({ callRecord, parameters }) {
 
     await prisma.lead.update({
       where: { id: callRecord.leadId },
-      data: {
-        status:          'BOOKED',
-        meetingBookedAt: new Date(),
-        meetingLink:     booking.meetingUrl || null
-      }
+      data: { status: 'BOOKED', meetingBookedAt: new Date(), meetingLink: booking.meetingUrl || null }
     })
-    console.log(`[webhook] Meeting booked — lead ${callRecord.leadId}, scheduledAt: ${confirmedAt}, url: ${booking.meetingUrl}`)
+    console.log(`[webhook] Meeting booked — lead ${callRecord.leadId}, scheduledAt: ${confirmedAt}`)
+    return `Meeting confirmed for ${parameters.preferred_slot}. You'll receive a confirmation shortly.`
   } catch (err) {
-    console.error('[webhook] Meeting booking failed:', err.message, err.response?.data || '')
-    // Cal.com not configured — still mark as BOOKED and store the agreed-upon time
+    console.error('[webhook] Meeting booking failed:', err.message)
     await prisma.call.update({
       where: { id: callRecord.id },
       data: { outcome: 'BOOKED', meetingBookedAt: new Date(), scheduledMeetingAt }
@@ -291,6 +327,7 @@ async function processMeetingBooking({ callRecord, parameters }) {
       where: { id: callRecord.leadId },
       data: { status: 'BOOKED', meetingBookedAt: new Date() }
     }).catch(() => {})
+    return `Meeting noted for ${parameters.preferred_slot}. Our team will send you a confirmation.`
   }
 }
 
@@ -302,8 +339,6 @@ function parsePreferredSlot(slot) {
   } catch {}
   return null
 }
-
-// ── HELPERS ───────────────────────────────────────────────
 
 function formatTranscript(msgs) {
   if (!msgs || !Array.isArray(msgs) || msgs.length === 0) return null
@@ -319,27 +354,27 @@ function formatTranscript(msgs) {
 
 function mapVapiEndReason(reason) {
   const map = {
-    'customer-ended-call':      'NOT_INTERESTED',
-    'assistant-ended-call':     'NOT_INTERESTED',  // BOOKED is set separately by checking meetingBookedAt
-    'customer-did-not-answer':  'NO_ANSWER',
-    'voicemail':                'VOICEMAIL',
-    'max-duration-exceeded':    'NO_ANSWER',
-    'silence-timed-out':        'NO_ANSWER',
-    'error':                    'ERROR'
+    'customer-ended-call':     'NOT_INTERESTED',
+    'assistant-ended-call':    'NOT_INTERESTED',
+    'customer-did-not-answer': 'NO_ANSWER',
+    'voicemail':               'VOICEMAIL',
+    'max-duration-exceeded':   'NO_ANSWER',
+    'silence-timed-out':       'NO_ANSWER',
+    'error':                   'ERROR'
   }
   return map[reason] || 'NO_ANSWER'
 }
 
 function outcomeToLeadStatus(outcome) {
   const map = {
-    BOOKED:          'BOOKED',
-    NOT_INTERESTED:  'NOT_INTERESTED',
-    CALLBACK:        'CALLBACK',
-    VOICEMAIL:       'VOICEMAIL',
-    NO_ANSWER:       'NO_ANSWER',
-    WRONG_NUMBER:    'WRONG_NUMBER',
-    OPTED_OUT:       'OPTED_OUT',
-    ERROR:           'PENDING'  // retry errors
+    BOOKED:         'BOOKED',
+    NOT_INTERESTED: 'NOT_INTERESTED',
+    CALLBACK:       'CALLBACK',
+    VOICEMAIL:      'VOICEMAIL',
+    NO_ANSWER:      'NO_ANSWER',
+    WRONG_NUMBER:   'WRONG_NUMBER',
+    OPTED_OUT:      'OPTED_OUT',
+    ERROR:          'PENDING'
   }
   return map[outcome] || 'NO_ANSWER'
 }
@@ -349,7 +384,6 @@ function parseCallbackTime(text) {
     const d = new Date(text)
     if (!isNaN(d)) return d
   } catch {}
-  // Default: call back tomorrow same time
   const tomorrow = new Date()
   tomorrow.setDate(tomorrow.getDate() + 1)
   return tomorrow

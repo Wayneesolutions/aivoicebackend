@@ -311,6 +311,8 @@ model Call {
   billedMinutes   Float?      // rounded up to nearest 0.1 min
   billedAmount    Float?      // billedMinutes * tenant.ratePerMinute
   
+  sentimentLog    Json?       // array of { ts, sentiment, intent, buying_signal, suggested_action }
+
   startedAt       DateTime?
   endedAt         DateTime?
   createdAt       DateTime    @default(now())

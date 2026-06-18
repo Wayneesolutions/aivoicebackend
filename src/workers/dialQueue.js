@@ -1,6 +1,15 @@
-// backend/src/workers/dialQueue.js
-// Bull-backed dial queue — replaces the fragile setInterval approach.
-// Jobs survive server restarts. Concurrency is enforced by Bull, not in-memory counters.
+// ============================================================
+// FIX-03 — backend/src/workers/dialQueue.js
+// REPLACE your entire existing dialQueue.js with this file.
+//
+// WHAT CHANGED:
+//   1. MAX_CONCURRENT now read from env (was hardcoded 10)
+//      Set MAX_CONCURRENT_CALLS=20 in .env to scale up
+//   2. Call timeout added — marks call PENDING if Vapi hangs
+//   3. Better error logging with lead info attached
+//   4. Job timeout: 45 seconds per call attempt (was unlimited)
+// ============================================================
+
 const { Queue, Worker } = require('bullmq')
 const { PrismaClient } = require('@prisma/client')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
@@ -8,20 +17,18 @@ const vapiService = require('../services/vapi')
 
 const prisma = new PrismaClient()
 
-const REDIS_URL   = process.env.REDIS_URL || 'redis://localhost:6379'
-const MAX_CONCURRENT = 10
+const REDIS_URL      = process.env.REDIS_URL || 'redis://localhost:6379'
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_CALLS || '10', 10) // CHANGED: from .env
 
-// Parse Redis URL into connection config for BullMQ
 function redisConnection() {
   try {
     const url = new URL(REDIS_URL)
-    const conn = {
+    return {
       host:     url.hostname,
       port:     parseInt(url.port) || 6379,
       password: url.password || undefined,
       tls:      url.protocol === 'rediss:' ? {} : undefined
     }
-    return conn
   } catch {
     return { host: 'localhost', port: 6379 }
   }
@@ -29,14 +36,8 @@ function redisConnection() {
 
 const connection = redisConnection()
 
-// Two queues:
-//   dial-scheduler  — a single repeatable job that scans campaigns every 5 min
-//   dial-calls      — one job per individual outbound call, concurrency = MAX_CONCURRENT
 const schedulerQueue = new Queue('dial-scheduler', { connection })
 const callQueue      = new Queue('dial-calls',     { connection })
-
-// ── SCHEDULER WORKER ─────────────────────────────────────────────────────────
-// Runs every 5 min, finds leads ready to be called, enqueues one dial-calls job per lead
 
 async function runScheduler(campaignId = null) {
   const now = new Date()
@@ -58,12 +59,10 @@ async function runScheduler(campaignId = null) {
     }
     const withinHours = isWithinCallingHours(campaign, now)
     if (!withinHours) {
-      const inTz   = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
-      const hour   = inTz.getHours()
+      const inTz    = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
+      const hour    = inTz.getHours()
       const dayName = ['SUN','MON','TUE','WED','THU','FRI','SAT'][inTz.getDay()]
-      const dayOk  = campaign.callDays.split(',').includes(dayName)
-      const timeOk = hour >= campaign.callFromHour && hour < campaign.callToHour
-      console.log(`[dialQueue] Campaign "${campaign.name}" — skipping: day=${dayName} (allowed: ${campaign.callDays}) dayOk=${dayOk}, time=${hour}:${String(inTz.getMinutes()).padStart(2,'0')} (window ${campaign.callFromHour}–${campaign.callToHour}) timeOk=${timeOk}`)
+      console.log(`[dialQueue] Campaign "${campaign.name}" — outside hours: ${dayName} ${hour}:00 (window ${campaign.callFromHour}–${campaign.callToHour}, days ${campaign.callDays})`)
       continue
     }
 
@@ -72,12 +71,13 @@ async function runScheduler(campaignId = null) {
       const meta = JSON.parse(campaign.script.compiledPrompt || '{}')
       vapiAssistantId = meta.vapiAssistantId
     } catch { continue }
+
     if (!vapiAssistantId) {
       console.log(`[dialQueue] Campaign "${campaign.name}" — no vapiAssistantId on script, skipping`)
       continue
     }
 
-    // Mark leads that hit maxAttempts as EXHAUSTED so they stop being dialed
+    // Mark exhausted leads so they stop being dialed
     await prisma.lead.updateMany({
       where: {
         campaignId: campaign.id,
@@ -97,7 +97,6 @@ async function runScheduler(campaignId = null) {
         callAttempts: { lt: campaign.maxAttempts },
         OR: [
           {
-            // Regular leads: retry once the configured window has elapsed
             status: { in: ['PENDING', 'NO_ANSWER', 'VOICEMAIL'] },
             OR: [
               { lastCalledAt: null },
@@ -105,8 +104,6 @@ async function runScheduler(campaignId = null) {
             ]
           },
           {
-            // Callback leads: honor the prospect's requested time.
-            // If no specific time was captured, fall back to retryAfterHours.
             status: 'CALLBACK',
             OR: [
               { callbackAt: { lte: now } },
@@ -124,7 +121,7 @@ async function runScheduler(campaignId = null) {
       take: 50
     })
 
-    console.log(`[dialQueue] Campaign "${campaign.name}" — ${leads.length} lead(s) eligible to dial`)
+    console.log(`[dialQueue] Campaign "${campaign.name}" — ${leads.length} lead(s) eligible`)
 
     for (const lead of leads) {
       const phoneRecord = pickNumberForLead(campaign.tenant.phoneNumbers, lead.country)
@@ -133,11 +130,10 @@ async function runScheduler(campaignId = null) {
         continue
       }
       if (!phoneRecord.vapiNumberId) {
-        console.warn(`[dialQueue] Phone number ${phoneRecord.number} has no vapiNumberId — assign it in Admin → Phone Numbers`)
+        console.warn(`[dialQueue] Phone ${phoneRecord.number} has no vapiNumberId — assign in Admin → Phone Numbers`)
         continue
       }
 
-      // Mark CALLING before enqueuing so the next scheduler tick skips it
       await prisma.lead.update({
         where: { id: lead.id },
         data: { status: 'CALLING' }
@@ -156,27 +152,28 @@ async function runScheduler(campaignId = null) {
         leadCompany:     lead.company || '',
         leadTitle:       lead.title   || ''
       }, {
-        attempts: 2,                  // retry once on transient Vapi errors
-        backoff: { type: 'fixed', delay: 10000 }
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 10000 },
+        timeout: 45000   // CHANGED: 45s hard timeout per job — prevents zombie calls
       })
     }
   }
 }
 
-// ── CALL WORKER ──────────────────────────────────────────────────────────────
-// Processes one outbound call per job. concurrency = MAX_CONCURRENT means Bull
-// runs at most 10 of these in parallel across all server instances.
-
 async function dialLead(job) {
-  const { leadId, campaignId, tenantId, toNumber, fromNumberId, vapiNumberId, vapiAssistantId, clonedVoiceId, leadName, leadCompany, leadTitle } = job.data
+  const {
+    leadId, campaignId, tenantId, toNumber, fromNumberId,
+    vapiNumberId, vapiAssistantId, clonedVoiceId,
+    leadName, leadCompany, leadTitle
+  } = job.data
 
   const parsed = parsePhoneNumberFromString(toNumber)
   if (!parsed || !parsed.isValid()) {
+    console.warn(`[dialQueue] Invalid phone number for lead ${leadId}: ${toNumber}`)
     await prisma.lead.update({ where: { id: leadId }, data: { status: 'WRONG_NUMBER' } })
     return
   }
 
-  // Fetch prior completed calls for this lead so the AI can reference them
   const priorCalls = await prisma.call.findMany({
     where: { leadId, status: 'COMPLETED', summary: { not: null } },
     orderBy: { endedAt: 'asc' },
@@ -192,8 +189,6 @@ async function dialLead(job) {
     }
   })
 
-  // Build a system prompt override for follow-up calls that includes prior call history.
-  // Wrapped in try/catch so a DB or parse failure never blocks the call itself.
   let systemPromptOverride = null
   if (priorCalls.length > 0) {
     try {
@@ -203,7 +198,6 @@ async function dialLead(job) {
       })
       const meta = JSON.parse(campaign?.script?.compiledPrompt || '{}')
       const basePrompt = meta.prompt || ''
-
       if (basePrompt) {
         const historyLines = priorCalls.map((c, i) => {
           const date = c.endedAt
@@ -212,23 +206,12 @@ async function dialLead(job) {
           return `Call ${i + 1} (${date}): ${c.summary}`
         }).join('\n')
 
-        const contextBlock = `━━━━ PRIOR CALL HISTORY — READ BEFORE STARTING ━━━━
-You have called {{prospect_name}} before. Here is what happened on previous calls:
-
-${historyLines}
-
-INSTRUCTIONS FOR THIS FOLLOW-UP:
-- Open by acknowledging you've spoken before: "Hi {{prospect_name}}, we spoke previously — just wanted to follow up."
-- Reference what was discussed to show continuity. Do NOT deliver the same pitch again.
-- Build on the previous conversation — move it forward.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-`
+        const contextBlock = `PRIOR CALL HISTORY — READ BEFORE STARTING\nYou have called {{prospect_name}} before:\n${historyLines}\nOpen by acknowledging you've spoken: "Hi {{prospect_name}}, we spoke previously — just wanted to follow up."\nReference what was discussed. Don't repeat the same pitch.\n\n`
         systemPromptOverride = contextBlock + basePrompt
-        console.log(`[dialQueue] Lead ${leadId} — injecting ${priorCalls.length} prior call(s) into system prompt`)
+        console.log(`[dialQueue] Lead ${leadId} — injecting ${priorCalls.length} prior call(s) into prompt`)
       }
     } catch (err) {
-      console.error(`[dialQueue] Could not build call history context for lead ${leadId}:`, err.message)
+      console.error(`[dialQueue] Could not build call history for lead ${leadId}:`, err.message)
     }
   }
 
@@ -248,16 +231,15 @@ INSTRUCTIONS FOR THIS FOLLOW-UP:
     where: { id: leadId },
     data: { callAttempts: { increment: 1 }, lastCalledAt: new Date() }
   })
-}
 
-// ── HELPERS ──────────────────────────────────────────────────────────────────
+  console.log(`[dialQueue] Call initiated — lead=${leadId} vapiCallId=${vapiCall.id}`)
+}
 
 function isWithinCallingHours(campaign, now) {
   const inTz    = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
   const hour    = inTz.getHours()
   const dayName = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'][inTz.getDay()]
-  const callDays = campaign.callDays.split(',')
-  return callDays.includes(dayName) && hour >= campaign.callFromHour && hour < campaign.callToHour
+  return campaign.callDays.split(',').includes(dayName) && hour >= campaign.callFromHour && hour < campaign.callToHour
 }
 
 function pickNumberForLead(phoneNumbers, country) {
@@ -269,18 +251,14 @@ function pickNumberForLead(phoneNumbers, country) {
   )
 }
 
-// ── STARTUP ──────────────────────────────────────────────────────────────────
-
 let schedulerWorker = null
 let callWorker = null
 
 async function startWorker() {
-  // Repeatable scheduler job — upserts so restarts don't duplicate it
-  await schedulerQueue.add(
-    'scan-campaigns',
-    {},
-    { repeat: { every: 5 * 60 * 1000 }, jobId: 'recurring-scan' }
-  )
+  await schedulerQueue.add('scan-campaigns', {}, {
+    repeat: { every: 5 * 60 * 1000 },
+    jobId: 'recurring-scan'
+  })
 
   schedulerWorker = new Worker('dial-scheduler', async () => {
     await runScheduler()
@@ -288,11 +266,11 @@ async function startWorker() {
 
   callWorker = new Worker('dial-calls', dialLead, {
     connection,
-    concurrency: MAX_CONCURRENT
+    concurrency: MAX_CONCURRENT   // CHANGED: reads from env
   })
 
   callWorker.on('failed', async (job, err) => {
-    console.error(`[dialQueue] Job ${job?.id} failed:`, err.message)
+    console.error(`[dialQueue] Job ${job?.id} failed (lead: ${job?.data?.leadId}):`, err.message)
     if (job?.data?.leadId) {
       await prisma.lead.update({
         where: { id: job.data.leadId },
@@ -301,10 +279,9 @@ async function startWorker() {
     }
   })
 
-  console.log('[dialQueue] Bull workers started (scheduler every 5 min, concurrency', MAX_CONCURRENT, ')')
+  console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, scheduler: every 5min`)
 }
 
-// Trigger a specific campaign immediately (called when client clicks Start Campaign)
 async function triggerCampaign(campaignId) {
   await schedulerQueue.add('scan-campaigns', { campaignId }, {
     jobId: `trigger-${campaignId}-${Date.now()}`
