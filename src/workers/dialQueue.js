@@ -39,7 +39,30 @@ const connection = redisConnection()
 const schedulerQueue = new Queue('dial-scheduler', { connection })
 const callQueue      = new Queue('dial-calls',     { connection })
 
+async function cleanupStaleCalls() {
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000) // 30 min
+  const stale = await prisma.call.findMany({
+    where: {
+      status: { in: ['IN_PROGRESS', 'RINGING', 'INITIATED'] },
+      createdAt: { lt: cutoff }
+    }
+  })
+  if (stale.length === 0) return
+  console.log(`[dialQueue] Cleaning up ${stale.length} stale call(s) > 60min`)
+  for (const call of stale) {
+    await prisma.call.update({
+      where: { id: call.id },
+      data: { status: 'COMPLETED', outcome: 'NO_ANSWER', durationSeconds: 0, endedAt: new Date() }
+    }).catch(() => {})
+    await prisma.lead.update({
+      where: { id: call.leadId },
+      data: { status: 'NO_ANSWER' }
+    }).catch(() => {})
+  }
+}
+
 async function runScheduler(campaignId = null) {
+  await cleanupStaleCalls()
   const now = new Date()
 
   const activeCampaigns = await prisma.campaign.findMany({

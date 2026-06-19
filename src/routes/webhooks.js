@@ -202,8 +202,8 @@ async function handleToolCalls(event) {
     try {
       if (name === 'book_meeting')     result = await processMeetingBooking({ callRecord, parameters })
       if (name === 'request_callback') result = await processCallback({ callRecord, parameters })
-      if (name === 'end_call')         { await processEndCall({ callRecord, parameters }); result = 'Call ended.' }
-      if (name === 'detect_sentiment') { await handleSentiment({ callRecord, parameters }); result = 'Sentiment recorded.' }
+      if (name === 'end_call')         { await processEndCall({ callRecord, parameters }); result = '' }
+      if (name === 'detect_sentiment') { await handleSentiment({ callRecord, parameters }); result = '' }
     } catch (err) {
       console.error(`[webhook] Error in tool ${name}:`, err.message)
       result = "Noted. I'll follow up on that."

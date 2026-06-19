@@ -792,4 +792,34 @@ function startOfMonth() {
   return d
 }
 
+// POST /api/admin/calls/cleanup-stale — immediately mark stuck calls as completed + reset bogus durations
+router.post('/calls/cleanup-stale', async (req, res, next) => {
+  try {
+    const cutoff = new Date(Date.now() - 30 * 60 * 1000) // 30 min
+
+    // 1. Mark still-stuck IN_PROGRESS calls as NO_ANSWER
+    const stale = await prisma.call.findMany({
+      where: { status: { in: ['IN_PROGRESS', 'RINGING', 'INITIATED'] }, createdAt: { lt: cutoff } }
+    })
+    for (const call of stale) {
+      await prisma.call.update({
+        where: { id: call.id },
+        data: { status: 'COMPLETED', outcome: 'NO_ANSWER', durationSeconds: 0, endedAt: new Date() }
+      }).catch(() => {})
+      await prisma.lead.update({
+        where: { id: call.leadId },
+        data: { status: 'NO_ANSWER' }
+      }).catch(() => {})
+    }
+
+    // 2. Reset bogus durations: NO_ANSWER calls shouldn't have duration > 10min
+    const bogus = await prisma.call.updateMany({
+      where: { outcome: 'NO_ANSWER', durationSeconds: { gt: 600 } },
+      data: { durationSeconds: 0 }
+    })
+
+    res.json({ staleCleaned: stale.length, bogusReset: bogus.count })
+  } catch (err) { next(err) }
+})
+
 module.exports = router
