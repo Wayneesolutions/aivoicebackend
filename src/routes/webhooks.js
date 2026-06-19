@@ -1,17 +1,15 @@
+// backend/src/routes/webhooks.js
 // ============================================================
-// FIX-04 — backend/src/routes/webhooks.js
-// REPLACE your entire existing webhooks.js with this file.
-//
-// WHAT CHANGED:
-//   1. Added handleSentiment() — stores detect_sentiment data
-//      from the AI into the Call record in real time
-//   2. detect_sentiment routed in both tool-calls and function-call handlers
-//   3. Sentiment stored as JSON in call.sentimentLog (add field to schema — see below)
-//
-// PRISMA SCHEMA CHANGE NEEDED:
-//   In prisma/schema.prisma, inside the Call model, add:
-//     sentimentLog Json?   // Array of { ts, sentiment, intent, buying_signal, suggested_action }
-//   Then run: npx prisma migrate dev --name add_sentiment_log
+// BUGFIX — webhooks.js
+// BUGS FIXED:
+//   BUG-3: processMeetingBooking catch block set outcome:'BOOKED' even when
+//           Cal.com call failed. Leads silently lost with no actual booking.
+//           Fixed: catch now sets outcome:'CALLBACK' so team can follow up.
+//   BUG-4: err.message masked actual Cal.com API error detail.
+//           Fixed: err.response?.data || err.message for full error.
+//   BUG-5: Campaign timezone not passed to calendarService.bookMeeting().
+//           Fixed: campaign included in query, timezone passed through.
+// ALL FIX-04 changes (sentimentLog) are preserved unchanged.
 // ============================================================
 
 const router = require('express').Router()
@@ -116,9 +114,9 @@ async function handleCallStarted(call) {
 }
 
 async function handleCallEnded(event) {
-  const call       = event.call || event
-  const artifact   = event.artifact || call.artifact || {}
-  const analysis   = event.analysis || call.analysis || {}
+  const call        = event.call || event
+  const artifact    = event.artifact || call.artifact || {}
+  const analysis    = event.analysis || call.analysis || {}
   const endedReason = event.endedReason || call.endedReason
 
   const callRecord = await prisma.call.findFirst({
@@ -136,8 +134,8 @@ async function handleCallEnded(event) {
   const mappedOutcome = mapVapiEndReason(endedReason) || 'NO_ANSWER'
   const outcome = callRecord.meetingBookedAt ? 'BOOKED' : mappedOutcome
 
-  const transcript  = formatTranscript(artifact.transcript) || formatTranscript(artifact.messages)
-  const summary     = analysis.summary || null
+  const transcript   = formatTranscript(artifact.transcript) || formatTranscript(artifact.messages)
+  const summary      = analysis.summary || null
   const recordingUrl = artifact.recordingUrl || null
 
   const billedMinutes = Math.ceil(durationSeconds / 6) / 10
@@ -160,11 +158,11 @@ async function handleCallEnded(event) {
 
   if (billedMinutes > 0) {
     await billingService.logUsage({
-      tenantId:     callRecord.tenantId,
-      callId:       callRecord.id,
-      minutes:      billedMinutes,
+      tenantId:      callRecord.tenantId,
+      callId:        callRecord.id,
+      minutes:       billedMinutes,
       ratePerMinute: callRecord.tenant.ratePerMinute,
-      amount:       billedAmount
+      amount:        billedAmount
     })
   }
 
@@ -193,7 +191,7 @@ async function handleToolCalls(event) {
 
     const callRecord = await prisma.call.findFirst({
       where: { vapiCallId: call.id },
-      include: { tenant: true, lead: true }
+      include: { tenant: true, lead: true, campaign: true }  // FIX BUG-5: include campaign for timezone
     })
     if (!callRecord) {
       results.push({ toolCallId, result: 'Internal error: call record not found.' })
@@ -208,7 +206,7 @@ async function handleToolCalls(event) {
       if (name === 'detect_sentiment') { await handleSentiment({ callRecord, parameters }); result = 'Sentiment recorded.' }
     } catch (err) {
       console.error(`[webhook] Error in tool ${name}:`, err.message)
-      result = 'Noted. I\'ll follow up on that.'
+      result = "Noted. I'll follow up on that."
     }
 
     results.push({ toolCallId, result })
@@ -223,23 +221,22 @@ async function handleFunctionCall(event) {
 
   const callRecord = await prisma.call.findFirst({
     where: { vapiCallId: call.id },
-    include: { tenant: true, lead: true }
+    include: { tenant: true, lead: true, campaign: true }  // FIX BUG-5: include campaign for timezone
   })
   if (!callRecord) return
 
   if (name === 'book_meeting')     await processMeetingBooking({ callRecord, parameters })
   if (name === 'request_callback') await processCallback({ callRecord, parameters })
   if (name === 'end_call')         await processEndCall({ callRecord, parameters })
-  if (name === 'detect_sentiment') await handleSentiment({ callRecord, parameters })  // NEW
+  if (name === 'detect_sentiment') await handleSentiment({ callRecord, parameters })
 }
 
-// NEW — stores sentiment snapshot from AI into Call.sentimentLog
+// Stores sentiment snapshot from AI into Call.sentimentLog
 async function handleSentiment({ callRecord, parameters }) {
   const { sentiment, intent, buying_signal, suggested_action } = parameters
   console.log(`[webhook] detect_sentiment — call=${callRecord.id} sentiment=${sentiment} intent=${intent} action=${suggested_action}`)
 
   try {
-    // Append to existing log (sentimentLog is a JSON array in the DB)
     const existing = callRecord.sentimentLog || []
     const entry = {
       ts:               new Date().toISOString(),
@@ -255,12 +252,10 @@ async function handleSentiment({ callRecord, parameters }) {
       data: { sentimentLog: updated }
     })
   } catch (err) {
-    // sentimentLog field may not exist yet — run the migration first
     console.error('[webhook] Could not save sentiment — did you run the migration?', err.message)
   }
 }
 
-// Extracted helpers (cleaner code)
 async function processCallback({ callRecord, parameters }) {
   const callbackAt = parseCallbackTime(parameters.callback_time)
   await prisma.lead.update({ where: { id: callRecord.leadId }, data: { status: 'CALLBACK', callbackAt } })
@@ -284,8 +279,11 @@ async function handleTranscriptUpdate(call) {
 }
 
 async function processMeetingBooking({ callRecord, parameters }) {
-  const { tenant, lead } = callRecord
+  const { tenant, lead, campaign } = callRecord
   console.log('[webhook] book_meeting called — params:', JSON.stringify(parameters))
+
+  // FIX BUG-5: extract campaign timezone so calendar uses correct local time
+  const campaignTimezone = campaign?.timezone || 'America/Toronto'
 
   const scheduledMeetingAt = parsePreferredSlot(parameters.preferred_slot)
 
@@ -295,7 +293,8 @@ async function processMeetingBooking({ callRecord, parameters }) {
       prospectName:  parameters.prospect_name  || lead.name,
       prospectEmail: parameters.prospect_email || lead.email,
       preferredSlot: parameters.preferred_slot,
-      notes:         parameters.notes || ''
+      notes:         parameters.notes || '',
+      timezone:      campaignTimezone    // FIX BUG-5: pass timezone
     })
 
     const confirmedAt = booking.startTime ? new Date(booking.startTime) : scheduledMeetingAt
@@ -315,19 +314,34 @@ async function processMeetingBooking({ callRecord, parameters }) {
       where: { id: callRecord.leadId },
       data: { status: 'BOOKED', meetingBookedAt: new Date(), meetingLink: booking.meetingUrl || null }
     })
-    console.log(`[webhook] Meeting booked — lead ${callRecord.leadId}, scheduledAt: ${confirmedAt}`)
+
+    console.log(`[webhook] Meeting booked successfully — lead ${callRecord.leadId}, scheduledAt: ${confirmedAt}`)
     return `Meeting confirmed for ${parameters.preferred_slot}. You'll receive a confirmation shortly.`
+
   } catch (err) {
-    console.error('[webhook] Meeting booking failed:', err.message)
+    // FIX BUG-4: log actual Cal.com error response, not just generic message
+    console.error('[webhook] Meeting booking failed:', err.response?.data || err.message)
+
+    // FIX BUG-3: DO NOT mark as BOOKED when booking failed.
+    // Set CALLBACK so the lead re-enters the queue for team follow-up.
     await prisma.call.update({
       where: { id: callRecord.id },
-      data: { outcome: 'BOOKED', meetingBookedAt: new Date(), scheduledMeetingAt }
+      data: {
+        outcome:            'CALLBACK',   // was: 'BOOKED' — WRONG
+        meetingBookedAt:    null,         // no meeting was actually created
+        scheduledMeetingAt: scheduledMeetingAt
+      }
     }).catch(() => {})
+
     await prisma.lead.update({
       where: { id: callRecord.leadId },
-      data: { status: 'BOOKED', meetingBookedAt: new Date() }
+      data: {
+        status:     'CALLBACK',           // was: 'BOOKED' — WRONG
+        callbackAt: scheduledMeetingAt    // team will call back around that time
+      }
     }).catch(() => {})
-    return `Meeting noted for ${parameters.preferred_slot}. Our team will send you a confirmation.`
+
+    return `I wasn't able to confirm that slot right now. Our team will call you back to finalise the time.`
   }
 }
 

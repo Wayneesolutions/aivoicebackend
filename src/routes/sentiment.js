@@ -1,68 +1,70 @@
+// backend/src/routes/sentiment.js
 // ============================================================
-// FIX-06 — NEW FILE: backend/src/routes/sentiment.js
-// This is a completely new file. Create it at that path.
-//
-// ALSO NEEDED in server.js — add this line with the other routes:
-//   app.use('/api/sentiment', require('./routes/sentiment'))
-//
-// WHAT THIS DOES:
-//   Exposes GET /api/sentiment/call/:callId
-//   Returns the real-time sentiment log for a live call.
-//   The admin frontend polls this every 5 seconds to show
-//   the live sentiment dashboard while a call is in progress.
+// BUGFIX — sentiment.js
+// BUG FIXED:
+//   BUG-6: Routes used requireTenantUser which blocked admin JWT with 403.
+//           Admin users couldn't see any live call sentiment data.
+//   FIXED:  Both routes now use verifyToken (raw JWT check only).
+//           Handler checks role: ADMIN → full access, TENANT_USER → own tenant only.
 // ============================================================
 
-const router  = require('express').Router()
-const prisma  = require('../lib/prisma')
-const { requireAdmin, requireTenantUser } = require('../middleware/auth')
+const router = require('express').Router()
+const prisma = require('../lib/prisma')
+const { verifyToken } = require('../middleware/auth')
 
-// GET /api/sentiment/call/:callId
-// Returns full sentiment log for a call. Accessible by admin or the call's tenant user.
-router.get('/call/:callId', requireTenantUser, async (req, res, next) => {
+// ── GET /api/sentiment/call/:callId ───────────────────────────────────────────
+// Returns full sentiment log for one call.
+// Admin: can see any call. Tenant user: own tenant only.
+router.get('/call/:callId', verifyToken, async (req, res, next) => {
   try {
     const call = await prisma.call.findUnique({
       where: { id: req.params.callId },
       select: {
-        id: true,
-        tenantId: true,
-        status: true,
-        sentimentLog: true,
+        id:              true,
+        tenantId:        true,
+        status:          true,
+        sentimentLog:    true,
         durationSeconds: true,
-        startedAt: true,
+        startedAt:       true,
         lead: { select: { id: true, name: true, company: true } }
       }
     })
 
     if (!call) return res.status(404).json({ error: 'Call not found' })
 
-    // Tenant users can only see their own calls
-    if (req.user.role !== 'ADMIN' && call.tenantId !== req.tenant?.id) {
+    // FIX: check role AFTER fetching call — admin always allowed
+    if (req.user.role === 'ADMIN') {
+      // full access — fall through
+    } else if (req.user.role === 'TENANT_USER') {
+      if (call.tenantId !== req.user.tenantId) {
+        return res.status(403).json({ error: 'Access denied' })
+      }
+    } else {
       return res.status(403).json({ error: 'Access denied' })
     }
 
     const log = Array.isArray(call.sentimentLog) ? call.sentimentLog : []
 
-    // Compute summary from the log
     const latestEntry   = log[log.length - 1] || null
     const hotSignals    = log.filter(e => e.intent === 'HOT').length
     const warmSignals   = log.filter(e => e.intent === 'WARM').length
     const negativeCount = log.filter(e => ['NEGATIVE', 'VERY_NEGATIVE'].includes(e.sentiment)).length
 
     const overallScore = log.length === 0 ? 'UNKNOWN'
-      : hotSignals > 0 ? 'HOT'
-      : warmSignals >= 2 ? 'WARM'
+      : hotSignals > 0          ? 'HOT'
+      : warmSignals >= 2        ? 'WARM'
       : negativeCount > log.length / 2 ? 'COLD'
       : 'NEUTRAL'
 
     res.json({
-      callId:        call.id,
-      status:        call.status,
-      lead:          call.lead,
-      startedAt:     call.startedAt,
+      callId:          call.id,
+      status:          call.status,
+      lead:            call.lead,
+      startedAt:       call.startedAt,
       durationSeconds: call.durationSeconds,
       overallScore,
-      latestSentiment: latestEntry?.sentiment || null,
-      latestIntent:    latestEntry?.intent    || null,
+      latestSentiment: latestEntry?.sentiment        || null,
+      latestIntent:    latestEntry?.intent           || null,
       suggestedAction: latestEntry?.suggested_action || null,
       buyingSignals:   log.filter(e => e.buying_signal).map(e => e.buying_signal),
       log
@@ -70,40 +72,51 @@ router.get('/call/:callId', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// GET /api/sentiment/active — all currently active calls for this tenant with their latest sentiment
-router.get('/active', requireTenantUser, async (req, res, next) => {
+// ── GET /api/sentiment/active ─────────────────────────────────────────────────
+// All currently active calls with latest sentiment.
+// Admin: sees all tenants. Tenant user: own tenant only.
+router.get('/active', verifyToken, async (req, res, next) => {
   try {
-    // Only return calls created in the last 30 minutes — anything older is a stale/stuck record
     const cutoff = new Date(Date.now() - 30 * 60 * 1000)
 
+    // FIX: build where clause based on role
+    const where = {
+      status:    { in: ['IN_PROGRESS', 'RINGING', 'INITIATED'] },
+      createdAt: { gte: cutoff }
+    }
+
+    if (req.user.role === 'TENANT_USER') {
+      where.tenantId = req.user.tenantId
+    }
+    // ADMIN: no tenantId filter — sees all active calls across all tenants
+
     const activeCalls = await prisma.call.findMany({
-      where: {
-        tenantId: req.tenant.id,
-        status: { in: ['IN_PROGRESS', 'RINGING', 'INITIATED'] },
-        createdAt: { gte: cutoff }
-      },
+      where,
       select: {
-        id: true,
-        status: true,
+        id:           true,
+        status:       true,
+        tenantId:     true,
         sentimentLog: true,
-        startedAt: true,
-        lead: { select: { id: true, name: true, company: true } },
-        campaign: { select: { name: true } }
+        startedAt:    true,
+        lead:         { select: { id: true, name: true, company: true } },
+        campaign:     { select: { name: true } },
+        tenant:       { select: { name: true } }   // admin needs to know which client
       },
       orderBy: { startedAt: 'desc' }
     })
 
     const result = activeCalls.map(call => {
-      const log = Array.isArray(call.sentimentLog) ? call.sentimentLog : []
+      const log    = Array.isArray(call.sentimentLog) ? call.sentimentLog : []
       const latest = log[log.length - 1] || null
       return {
-        callId:    call.id,
-        status:    call.status,
-        startedAt: call.startedAt,
-        lead:      call.lead,
-        campaign:  call.campaign?.name || null,
-        sentiment: latest?.sentiment    || 'UNKNOWN',
-        intent:    latest?.intent       || 'UNKNOWN',
+        callId:          call.id,
+        status:          call.status,
+        tenantName:      call.tenant?.name || null,   // visible to admin
+        startedAt:       call.startedAt,
+        lead:            call.lead,
+        campaign:        call.campaign?.name || null,
+        sentiment:       latest?.sentiment        || 'UNKNOWN',
+        intent:          latest?.intent           || 'UNKNOWN',
         suggestedAction: latest?.suggested_action || null
       }
     })

@@ -20,19 +20,16 @@ const { getVapiFunctions } = require('./script')
 
 // Map our language codes to Deepgram language codes
 const DEEPGRAM_LANG = {
-  en: 'en-US', hi: 'hi', hinglish: 'hi', pa: 'hi',
-  es: 'es',    fr: 'fr', de: 'de',
-  pt: 'pt',    ar: 'ar', zh: 'zh-CN', ja: 'ja', ko: 'ko',
-  ru: 'ru',    it: 'it', nl: 'nl',    tr: 'tr', pl: 'pl'
+  en:      'en-US',
+  hi:      'hi',
+  hinglish: 'multi',  // FIXED: was 'hi' — multi handles Hindi+English mixing
+  'en-hi': 'multi',   // explicit bilingual option
+  pa:      'hi',      // Punjabi — closest supported
+  es: 'es', fr: 'fr', de: 'de', pt: 'pt', ar: 'ar',
+  zh: 'zh-CN', ja: 'ja', ko: 'ko', ru: 'ru',
+  it: 'it', nl: 'nl', tr: 'tr', pl: 'pl'
 }
 
-// Keyterms that Deepgram must never mishear — add your brand names here
-// Format: 'word:boost' where boost is 1.0–5.0 (higher = stronger bias)
-const BASE_KEYTERMS = [
-  'VoCallM:3',
-  'Wayne:2',
-  'Wayne Solutions:3',
-]
 
 const vapiClient = axios.create({
   baseURL: 'https://api.vapi.ai',
@@ -44,10 +41,13 @@ const VAPI_BUILTIN_VOICE = '21m00Tcm4TlvDq8ikWAM'
 /**
  * Create or update a Vapi assistant for a given script.
  */
-async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, existingAssistantId, customKeyterms = [] }) {
+async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, existingAssistantId }) {
 
-  // Merge base keyterms with any script-specific ones
-  const allKeyterms = [...BASE_KEYTERMS, ...customKeyterms]
+  const deepgramLang = DEEPGRAM_LANG[language || 'en'] || 'en-US'
+  // For hinglish/en-hi: enable Nova-3 multi-language detection
+  const transcriberExtra = deepgramLang === 'multi'
+    ? { detect_language: true, filler_words: false }
+    : {}
 
   const payload = {
     name,
@@ -57,12 +57,12 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       systemPrompt,
       tools: getVapiFunctions(),
       temperature: 0.7,
-      maxTokens: 80,                      // CHANGED: 150 → 80 (faster first word, ~1s saved)
+      maxTokens: 80,
     },
     voice: {
       provider: '11labs',
       voiceId: (voiceId && voiceId !== VAPI_BUILTIN_VOICE) ? voiceId : process.env.ELEVENLABS_DEFAULT_VOICE_ID,
-      model: 'eleven_flash_v2_5',         // CHANGED: turbo → flash (300ms faster TTS)
+      model: 'eleven_flash_v2_5',
       stability: 0.5,
       similarityBoost: 0.75,
       useSpeakerBoost: true,
@@ -73,28 +73,22 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     },
     transcriber: {
       provider: 'deepgram',
-      model: 'nova-3',                    // CHANGED: nova-2 → nova-3 (better Hinglish/accent accuracy)
-      language: DEEPGRAM_LANG[language || 'en'] || 'en-US',
+      model: 'nova-3',
+      language: deepgramLang,
       smartFormat: true,
-      endpointing: 10,                    // CHANGED: 150 → 10 (biggest single lag fix, -140ms)
-      keyterms: allKeyterms,              // NEW: stops Deepgram mishearing brand/product names
+      endpointing: 10,
+      ...transcriberExtra,
     },
     firstMessage: `Hi, may I speak with {{prospect_name}}? This is ${agentName} calling.`,
     recordingEnabled: true,
     silenceTimeoutSeconds: 30,
     maxDurationSeconds: 600,
     backgroundSound: 'office',
-    backgroundDenoising: true,            // NEW: removes phone line static/noise
-    smartEndpointingEnabled: true,        // NEW: AI stops mid-sentence when user interrupts
-    backchannel: {                        // NEW: AI says "Sure..." / "Got it" while thinking
-      enabled: true,
-      words: ['Sure', 'Got it', 'Mmm', 'Absolutely', 'Of course', 'Right', 'I see'],
-    },
     serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
   }
 
-  console.log('[VAPI] upsertAssistant voiceId =', payload.voice.voiceId, '| model =', payload.model.model)
+  console.log('[VAPI] upsertAssistant lang =', language, '| deepgramLang =', deepgramLang)
   try {
     if (existingAssistantId) {
       const res = await vapiClient.patch(`/assistant/${existingAssistantId}`, payload)

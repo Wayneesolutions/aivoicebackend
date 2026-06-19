@@ -426,6 +426,45 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// POST /api/admin/scripts/:id/resync — re-push already-approved script to Vapi without changing approval status
+router.post('/scripts/:id/resync', async (req, res, next) => {
+  try {
+    const scriptService = require('../services/script')
+    const script = await prisma.script.findUnique({ where: { id: req.params.id } })
+    if (!script) return res.status(404).json({ error: 'Script not found' })
+
+    // Extract existing Vapi assistant ID so we PATCH it rather than POST a duplicate
+    let existingAssistantId = null
+    try {
+      const stored = JSON.parse(script.compiledPrompt || '{}')
+      existingAssistantId = stored.vapiAssistantId || null
+    } catch {}
+
+    console.log('[resync] scriptId=', script.id, 'existingAssistantId=', existingAssistantId)
+
+    const compiledPrompt = scriptService.compileSystemPrompt(script)
+    const vapiAssistantId = await vapiService.upsertAssistant({
+      name: `${script.agentName} — ${script.id}`,
+      systemPrompt: compiledPrompt,
+      voiceId: script.voiceId,
+      agentName: script.agentName,
+      language: script.language || 'en',
+      existingAssistantId
+    })
+
+    const updated = await prisma.script.update({
+      where: { id: req.params.id },
+      data: { compiledPrompt: JSON.stringify({ vapiAssistantId, prompt: compiledPrompt }) }
+    })
+    res.json(updated)
+  } catch (err) {
+    // Surface the actual Vapi error detail to help debug
+    const detail = err.response?.data || err.message
+    console.error('[resync] Vapi error:', JSON.stringify(detail))
+    res.status(500).json({ error: typeof detail === 'object' ? JSON.stringify(detail) : detail })
+  }
+})
+
 // POST /api/admin/scripts/:id/reject
 router.post('/scripts/:id/reject', async (req, res, next) => {
   try {
