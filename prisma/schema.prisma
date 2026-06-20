@@ -154,6 +154,7 @@ model Script {
   // Voice config
   voiceId       String        @default("Zfdm6VIqhPJ3dNiRCAN7")  // ElevenLabs voice ID
   agentName     String        @default("Alex")                    // name the caller uses
+  agentGender   String        @default("female")                  // "male" | "female" — affects Hindi/Punjabi verb forms
   language      String        @default("en")                      // BCP-47 code: "en", "hi", "es", "fr", etc.
   
   // Approval workflow

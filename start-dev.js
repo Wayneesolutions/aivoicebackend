@@ -37,6 +37,8 @@ async function patchVapiAssistants(baseUrl) {
         systemPrompt: meta.prompt,
         voiceId: s.voiceId,
         agentName: s.agentName,
+        language: s.language || 'en',
+        agentGender: s.agentGender || 'female',
         existingAssistantId: meta.vapiAssistantId
       })
       console.log(`[start-dev] Updated Vapi assistant ${meta.vapiAssistantId} → ${baseUrl}`)

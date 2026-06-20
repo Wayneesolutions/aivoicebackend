@@ -1,13 +1,14 @@
 // ============================================================
-// FIX-03 — backend/src/workers/dialQueue.js
-// REPLACE your entire existing dialQueue.js with this file.
+// FIX-03 + language fix — backend/src/workers/dialQueue.js
 //
-// WHAT CHANGED:
+// WHAT CHANGED vs prior version:
 //   1. MAX_CONCURRENT now read from env (was hardcoded 10)
 //      Set MAX_CONCURRENT_CALLS=20 in .env to scale up
 //   2. Call timeout added — marks call PENDING if Vapi hangs
 //   3. Better error logging with lead info attached
 //   4. Job timeout: 45 seconds per call attempt (was unlimited)
+//   5. Script language fetched + passed to vapiService so language-aware
+//      greeting (BUG-D fix in vapi.js) fires correctly on outbound calls
 // ============================================================
 
 const { Queue, Worker } = require('bullmq')
@@ -18,7 +19,7 @@ const vapiService = require('../services/vapi')
 const prisma = new PrismaClient()
 
 const REDIS_URL      = process.env.REDIS_URL || 'redis://localhost:6379'
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_CALLS || '10', 10) // CHANGED: from .env
+const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_CALLS || '10', 10)
 
 function redisConnection() {
   try {
@@ -81,13 +82,6 @@ async function runScheduler(campaignId = null) {
       continue
     }
     const withinHours = isWithinCallingHours(campaign, now)
-    if (!withinHours) {
-      const inTz    = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
-      const hour    = inTz.getHours()
-      const dayName = ['SUN','MON','TUE','WED','THU','FRI','SAT'][inTz.getDay()]
-      console.log(`[dialQueue] Campaign "${campaign.name}" — outside hours: ${dayName} ${hour}:00 (window ${campaign.callFromHour}–${campaign.callToHour}, days ${campaign.callDays})`)
-      continue
-    }
 
     let vapiAssistantId
     try {
@@ -113,38 +107,57 @@ async function runScheduler(campaignId = null) {
 
     const retryThreshold = new Date(now - campaign.retryAfterHours * 60 * 60 * 1000)
 
+    // Build lead query:
+    //   - Explicit scheduled callbacks (callbackAt set + time has arrived) → always dial,
+    //     even on Sunday or outside calling hours, because the lead specifically asked.
+    //   - All other leads (PENDING, NO_ANSWER, VOICEMAIL, null-callbackAt CALLBACK) →
+    //     only during configured calling hours/days.
     const leads = await prisma.lead.findMany({
       where: {
         campaignId: campaign.id,
         isOptedOut: false,
         callAttempts: { lt: campaign.maxAttempts },
         OR: [
-          {
-            status: { in: ['PENDING', 'NO_ANSWER', 'VOICEMAIL'] },
-            OR: [
-              { lastCalledAt: null },
-              { lastCalledAt: { lte: retryThreshold } }
-            ]
-          },
+          // Explicit scheduled callback — bypass calling hours entirely
           {
             status: 'CALLBACK',
-            OR: [
-              { callbackAt: { lte: now } },
-              {
-                callbackAt: null,
-                OR: [
-                  { lastCalledAt: null },
-                  { lastCalledAt: { lte: retryThreshold } }
-                ]
-              }
-            ]
-          }
+            callbackAt: { not: null, lte: now }
+          },
+          // Everything else — only when within calling hours
+          ...(withinHours ? [
+            {
+              status: { in: ['PENDING', 'NO_ANSWER', 'VOICEMAIL'] },
+              OR: [
+                { lastCalledAt: null },
+                { lastCalledAt: { lte: retryThreshold } }
+              ]
+            },
+            {
+              status: 'CALLBACK',
+              callbackAt: null,
+              OR: [
+                { lastCalledAt: null },
+                { lastCalledAt: { lte: retryThreshold } }
+              ]
+            }
+          ] : [])
         ]
       },
       take: 50
     })
 
-    console.log(`[dialQueue] Campaign "${campaign.name}" — ${leads.length} lead(s) eligible`)
+    if (leads.length === 0) {
+      if (!withinHours) {
+        const inTz    = new Date(now.toLocaleString('en-US', { timeZone: campaign.timezone }))
+        const hour    = inTz.getHours()
+        const dayName = ['SUN','MON','TUE','WED','THU','FRI','SAT'][inTz.getDay()]
+        console.log(`[dialQueue] Campaign "${campaign.name}" — outside hours (${dayName} ${hour}:00) and no scheduled callbacks due`)
+      }
+      continue
+    }
+
+    const callbackCount = leads.filter(l => l.status === 'CALLBACK' && l.callbackAt).length
+    console.log(`[dialQueue] Campaign "${campaign.name}" — ${leads.length} lead(s) eligible${callbackCount ? ` (${callbackCount} scheduled callback${callbackCount > 1 ? 's' : ''})` : ''}`)
 
     for (const lead of leads) {
       const phoneRecord = pickNumberForLead(campaign.tenant.phoneNumbers, lead.country)
@@ -177,7 +190,7 @@ async function runScheduler(campaignId = null) {
       }, {
         attempts: 2,
         backoff: { type: 'fixed', delay: 10000 },
-        timeout: 45000   // CHANGED: 45s hard timeout per job — prevents zombie calls
+        timeout: 45000   // 45s hard timeout per job — prevents zombie calls
       })
     }
   }
@@ -212,13 +225,21 @@ async function dialLead(job) {
     }
   })
 
+  // Fetch script language so it can be passed through to vapiService —
+  // needed so the language-aware greeting (BUG-D in vapi.js) fires correctly
+  // even when a per-call voice override (clonedVoiceId) is used.
+  let scriptLanguage = 'en'
+  let scriptGender = 'female'
   let systemPromptOverride = null
-  if (priorCalls.length > 0) {
-    try {
-      const campaign = await prisma.campaign.findUnique({
-        where: { id: campaignId },
-        select: { script: { select: { compiledPrompt: true } } }
-      })
+  try {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      select: { script: { select: { compiledPrompt: true, language: true, agentGender: true } } }
+    })
+    scriptLanguage = campaign?.script?.language || 'en'
+    scriptGender   = campaign?.script?.agentGender || 'female'
+
+    if (priorCalls.length > 0) {
       const meta = JSON.parse(campaign?.script?.compiledPrompt || '{}')
       const basePrompt = meta.prompt || ''
       if (basePrompt) {
@@ -233,20 +254,25 @@ async function dialLead(job) {
         systemPromptOverride = contextBlock + basePrompt
         console.log(`[dialQueue] Lead ${leadId} — injecting ${priorCalls.length} prior call(s) into prompt`)
       }
-    } catch (err) {
-      console.error(`[dialQueue] Could not build call history for lead ${leadId}:`, err.message)
     }
+  } catch (err) {
+    console.error(`[dialQueue] Could not build call history / fetch script language for lead ${leadId}:`, err.message)
   }
 
   const vapiCall = await vapiService.startOutboundCall({
     toNumber, vapiNumberId, vapiAssistantId,
     voiceOverrideId: clonedVoiceId || undefined,
     systemPromptOverride,
+    language: scriptLanguage,
+    agentGender: scriptGender,
     metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
   })
 
   await prisma.call.update({
     where: { id: callRecord.id },
+    // startedAt here is DIAL time, not ANSWER time — Vapi hasn't connected yet.
+    // This gets overwritten by handleCallStarted() in webhooks.js once the call
+    // actually connects (status: IN_PROGRESS).
     data: { vapiCallId: vapiCall.id, status: 'RINGING', startedAt: new Date() }
   })
 
@@ -289,7 +315,7 @@ async function startWorker() {
 
   callWorker = new Worker('dial-calls', dialLead, {
     connection,
-    concurrency: MAX_CONCURRENT   // CHANGED: reads from env
+    concurrency: MAX_CONCURRENT
   })
 
   callWorker.on('failed', async (job, err) => {

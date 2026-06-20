@@ -46,7 +46,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
 // POST /api/scripts — client submits new script for approval
 router.post('/', requireTenantOwner, async (req, res, next) => {
   try {
-    const { name, companyInfo, servicesInfo, goalText, objections, agentName, voiceId, language } = req.body
+    const { name, companyInfo, servicesInfo, goalText, objections, agentName, voiceId, language, agentGender } = req.body
     if (!companyInfo || !servicesInfo || !goalText)
       return res.status(400).json({ error: 'companyInfo, servicesInfo, and goalText required' })
 
@@ -59,6 +59,7 @@ router.post('/', requireTenantOwner, async (req, res, next) => {
         agentName:   agentName  || 'Alex',
         voiceId:     voiceId    || process.env.ELEVENLABS_DEFAULT_VOICE_ID,
         language:    language   || 'en',
+        agentGender: agentGender === 'male' ? 'male' : 'female',
         status:      'PENDING_REVIEW'
       }
     })

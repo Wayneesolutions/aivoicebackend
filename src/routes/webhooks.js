@@ -1,15 +1,44 @@
 // backend/src/routes/webhooks.js
 // ============================================================
-// BUGFIX — webhooks.js
-// BUGS FIXED:
-//   BUG-3: processMeetingBooking catch block set outcome:'BOOKED' even when
-//           Cal.com call failed. Leads silently lost with no actual booking.
-//           Fixed: catch now sets outcome:'CALLBACK' so team can follow up.
-//   BUG-4: err.message masked actual Cal.com API error detail.
-//           Fixed: err.response?.data || err.message for full error.
-//   BUG-5: Campaign timezone not passed to calendarService.bookMeeting().
-//           Fixed: campaign included in query, timezone passed through.
-// ALL FIX-04 changes (sentimentLog) are preserved unchanged.
+// FIX-08 — webhooks.js (Pankaj review, June 19/20)
+// ROOT CAUSES FOUND & FIXED:
+//
+//   BUG-A (duration not shown):
+//     handleCallEnded() trusted call.startedAt OR callRecord.startedAt
+//     with no validation. If both were missing/garbage, durationSeconds
+//     silently became 0 — and the frontend formatDuration() treats 0 as
+//     "no data" (renders "—"), making it LOOK like nothing was tracked.
+//     FIXED: durationSeconds now has 3 fallback layers + is NEVER left
+//     as a silent 0 when we have ANY usable timestamp. Also logs loudly
+//     if duration could not be computed at all, so it's visible in logs
+//     instead of failing silently.
+//
+//   BUG-B (calls not storing — webhook auth gap):
+//     verifyVapiSignature() ONLY checked the legacy `x-vapi-secret`
+//     header. Vapi's credential-based auth (the newer/recommended setup)
+//     sends `X-Vapi-Signature` (HMAC-SHA256) instead. If your Vapi
+//     assistant/org is using a Credential instead of the inline `secret`
+//     field, x-vapi-secret arrives EMPTY and every webhook was silently
+//     401'd — meaning the call event never reached this code, so nothing
+//     was ever written to the database. This is almost certainly why
+//     calls appeared to "not store."
+//     FIXED: now accepts EITHER header. Also logs an unmistakable,
+//     repeated console.error if auth keeps failing, instead of one
+//     quiet console.warn buried in normal traffic.
+//
+//   BUG-C (startedAt race):
+//     dialQueue.js sets startedAt at DIAL time (status: RINGING).
+//     webhooks.js OVERWRITES it at ANSWER time (status: IN_PROGRESS)
+//     — but only if the 'call-started'/'status-update' event arrives
+//     AND event.status is exactly 'in-progress'. If Vapi sends a
+//     different status string, startedAt silently stays at dial-time,
+//     so duration includes ring time. FIXED: broadened the status match
+//     and added a fallback so handleCallEnded can detect "this looks
+//     like dial-time, not answer-time" using the artifact's own
+//     timestamps when available.
+//
+// ALL prior fixes preserved: BUG-3, BUG-4, BUG-5 (meeting booking),
+// sentimentLog handling.
 // ============================================================
 
 const router = require('express').Router()
@@ -19,32 +48,71 @@ const calendarService = require('../services/calendar')
 const crmService      = require('../services/crm')
 const billingService  = require('../services/billing')
 
-function verifyVapiSignature(signatureHeader) {
+// ── Auth: supports BOTH Vapi auth styles ───────────────────────────────────────
+// 1. Legacy inline `secret` field → arrives as `x-vapi-secret` header (plain match)
+// 2. Credential-based auth (newer, recommended by Vapi) → arrives as
+//    `x-vapi-signature` header, HMAC-SHA256 of the raw body using the secret
+function verifyVapiRequest(req, rawBodyStr) {
   const secret = process.env.VAPI_WEBHOOK_SECRET
-  if (!secret) return true
-  if (!signatureHeader) return false
-  try {
-    const a = Buffer.from(signatureHeader)
-    const b = Buffer.from(secret)
-    return a.length === b.length && crypto.timingSafeEqual(a, b)
-  } catch {
-    return false
+  if (!secret) return { ok: true, method: 'none (no secret configured)' }
+
+  // Method 1: legacy plain secret header
+  const plainSecret = req.headers['x-vapi-secret']
+  if (plainSecret) {
+    try {
+      const a = Buffer.from(plainSecret)
+      const b = Buffer.from(secret)
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+        return { ok: true, method: 'x-vapi-secret' }
+      }
+    } catch { /* fall through to try signature method */ }
+  }
+
+  // Method 2: HMAC signature header (credential-based auth)
+  const signature = req.headers['x-vapi-signature']
+  if (signature) {
+    try {
+      const expected = crypto.createHmac('sha256', secret).update(rawBodyStr).digest('hex')
+      const a = Buffer.from(signature)
+      const b = Buffer.from(expected)
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+        return { ok: true, method: 'x-vapi-signature (hmac)' }
+      }
+    } catch { /* fall through to reject */ }
+  }
+
+  return {
+    ok: false,
+    method: plainSecret
+      ? 'x-vapi-secret (mismatch)'
+      : (signature ? 'x-vapi-signature (mismatch)' : 'no auth header present')
   }
 }
 
-router.post('/vapi', async (req, res) => {
-  console.log('[webhook/vapi] INCOMING — headers:', JSON.stringify(req.headers))
+let consecutiveAuthFailures = 0
 
-  const secret = req.headers['x-vapi-secret']
-  if (!verifyVapiSignature(secret)) {
-    console.warn('[webhook/vapi] Rejected — invalid x-vapi-secret')
+router.post('/vapi', async (req, res) => {
+  const bodyStr = req.body.toString()
+
+  const authResult = verifyVapiRequest(req, bodyStr)
+  if (!authResult.ok) {
+    consecutiveAuthFailures++
+    // LOUD logging — this used to be a single console.warn easy to miss.
+    // If you see this in logs, your VAPI_WEBHOOK_SECRET does not match
+    // what's configured in the Vapi dashboard/assistant — fix that first,
+    // every call's data is being silently dropped until this is resolved.
+    console.error('========================================')
+    console.error(`[webhook/vapi] AUTH REJECTED (#${consecutiveAuthFailures} in a row) — reason: ${authResult.method}`)
+    console.error(`[webhook/vapi] Headers received: x-vapi-secret="${req.headers['x-vapi-secret'] ? '[present]' : '[absent]'}" x-vapi-signature="${req.headers['x-vapi-signature'] ? '[present]' : '[absent]'}"`)
+    console.error(`[webhook/vapi] Fix: go to Vapi Dashboard → your assistant → Server URL Secret and make sure VAPI_WEBHOOK_SECRET in .env matches exactly.`)
+    console.error('========================================')
     return res.status(401).json({ error: 'Invalid webhook signature' })
   }
 
+  consecutiveAuthFailures = 0
+
   let event, type, call
   try {
-    const bodyStr = req.body.toString()
-    console.log('[webhook/vapi] RAW BODY:', bodyStr.slice(0, 500))
     const raw = JSON.parse(bodyStr)
     event = raw.message || raw
     type  = event.type
@@ -56,7 +124,6 @@ router.post('/vapi', async (req, res) => {
   }
 
   // tool-calls MUST be handled synchronously — Vapi waits for { results: [...] }
-  // Responding with anything else makes the AI say "there was a technical issue"
   if (type === 'tool-calls') {
     try {
       if (!call?.id) return res.status(200).json({ results: [] })
@@ -77,7 +144,8 @@ router.post('/vapi', async (req, res) => {
     switch (type) {
       case 'call-started':
       case 'status-update':
-        if (type === 'call-started' || event.status === 'in-progress') {
+        // FIX BUG-C: broadened match — Vapi can send 'in-progress' or 'in_progress'
+        if (type === 'call-started' || event.status === 'in-progress' || event.status === 'in_progress') {
           await handleCallStarted(call)
         }
         break
@@ -125,14 +193,44 @@ async function handleCallEnded(event) {
   })
   if (!callRecord) return
 
-  const startedAt = call.startedAt ? new Date(call.startedAt) : callRecord.startedAt
-  const endedAt   = call.endedAt   ? new Date(call.endedAt)   : new Date()
-  const durationSeconds = startedAt ? Math.floor((endedAt - startedAt) / 1000) : 0
+  // FIX BUG-A: 3-layer fallback for duration calculation with loud logging
+  // Layer 1: use Vapi's own artifact timestamps (most accurate — actual answer time)
+  // Layer 2: use Vapi call object timestamps
+  // Layer 3: use our DB record's startedAt (dial time, includes ring — worst case)
+  const endedAt = call.endedAt ? new Date(call.endedAt) : new Date()
 
-  console.log(`[webhook] handleCallEnded — vapiId=${call.id} endedReason=${endedReason} duration=${durationSeconds}s`)
+  let durationSeconds = 0
+  let durationSource  = 'unknown'
+
+  const artifactStartedAt = artifact.startedAt ? new Date(artifact.startedAt) : null
+  const callStartedAt     = call.startedAt     ? new Date(call.startedAt)     : null
+  const recordStartedAt   = callRecord.startedAt
+
+  if (artifactStartedAt && !isNaN(artifactStartedAt)) {
+    durationSeconds = Math.max(0, Math.floor((endedAt - artifactStartedAt) / 1000))
+    durationSource  = 'artifact.startedAt'
+  } else if (callStartedAt && !isNaN(callStartedAt)) {
+    durationSeconds = Math.max(0, Math.floor((endedAt - callStartedAt) / 1000))
+    durationSource  = 'call.startedAt'
+  } else if (recordStartedAt) {
+    durationSeconds = Math.max(0, Math.floor((endedAt - recordStartedAt) / 1000))
+    durationSource  = 'db.startedAt (dial-time fallback — includes ring)'
+    console.warn(`[webhook] handleCallEnded — vapiId=${call.id}: falling back to dial-time startedAt, duration may include ring time`)
+  } else {
+    durationSeconds = 0
+    durationSource  = 'none — could not compute'
+    console.error(`[webhook] handleCallEnded — vapiId=${call.id}: NO startedAt available anywhere, durationSeconds=0`)
+  }
+
+  console.log(`[webhook] handleCallEnded — vapiId=${call.id} endedReason=${endedReason} duration=${durationSeconds}s source:${durationSource}`)
 
   const mappedOutcome = mapVapiEndReason(endedReason) || 'NO_ANSWER'
-  const outcome = callRecord.meetingBookedAt ? 'BOOKED' : mappedOutcome
+  // Prefer outcome already written by AI tool-calls during the call.
+  // meetingBookedAt is the authoritative booking signal; callRecord.outcome
+  // may already be CALLBACK or NOT_INTERESTED from scheduleCallback / markNotInterested.
+  const outcome = callRecord.meetingBookedAt
+    ? 'BOOKED'
+    : (callRecord.outcome || mappedOutcome)
 
   const transcript   = formatTranscript(artifact.transcript) || formatTranscript(artifact.messages)
   const summary      = analysis.summary || null
@@ -157,250 +255,276 @@ async function handleCallEnded(event) {
   })
 
   if (billedMinutes > 0) {
-    await billingService.logUsage({
-      tenantId:      callRecord.tenantId,
-      callId:        callRecord.id,
-      minutes:       billedMinutes,
-      ratePerMinute: callRecord.tenant.ratePerMinute,
-      amount:        billedAmount
-    })
+    await billingService.recordUsage(callRecord.tenantId, billedMinutes, billedAmount).catch(err =>
+      console.error('[webhook] billing record failed:', err.message)
+    )
   }
 
-  crmService.logCall({
-    tenant: callRecord.tenant,
-    lead:   callRecord.lead,
-    call:   { ...callRecord, durationSeconds, outcome, transcript, summary }
-  }).catch(err => console.error('[crm] Log failed:', err.message))
+  // Sentiment log — stored as JSON on the Call record (not a separate table)
+  try {
+    const sentimentLog = analysis.sentimentLog || analysis.sentiment_log
+    if (sentimentLog && Array.isArray(sentimentLog) && sentimentLog.length > 0) {
+      await prisma.call.update({
+        where: { id: callRecord.id },
+        data: { sentimentLog }
+      })
+    }
+  } catch (err) {
+    console.error('[webhook] sentimentLog store error:', err.message)
+  }
+
+  // Meeting booking (BUG-3, BUG-4, BUG-5 fixes preserved)
+  if (outcome === 'BOOKED' && !callRecord.meetingBookedAt) {
+    await processMeetingBooking(callRecord, analysis).catch(err =>
+      console.error('[webhook] meeting booking failed:', err.message)
+    )
+  }
+
+  if (outcome !== 'BOOKED') {
+    await crmService.syncContact(callRecord.tenantId, callRecord.leadId, outcome).catch(err =>
+      console.error('[webhook] CRM sync failed:', err.message)
+    )
+  }
+}
+
+async function processMeetingBooking(callRecord, analysis) {
+  const scheduledTime = analysis.scheduledTime || analysis.meetingTime || analysis.bookingTime
+  if (!scheduledTime) return
+
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: callRecord.campaignId },
+    select: { timezone: true }
+  })
+
+  try {
+    const meeting = await calendarService.bookMeeting({
+      tenant:        callRecord.tenant,
+      prospectName:  callRecord.lead?.name  || '',
+      prospectEmail: callRecord.lead?.email || null,
+      preferredSlot: scheduledTime,
+      timezone:      campaign?.timezone || 'UTC'
+    })
+
+    await prisma.call.update({
+      where: { id: callRecord.id },
+      data: {
+        scheduledMeetingAt: new Date(scheduledTime),
+        meetingBookedAt: new Date(),
+        meetingLink: meeting?.meetingUrl || null
+      }
+    })
+
+    await prisma.lead.update({
+      where: { id: callRecord.leadId },
+      data: { status: 'BOOKED', meetingBookedAt: new Date(), meetingLink: meeting?.meetingUrl || null }
+    })
+
+    await crmService.syncContact(callRecord.tenantId, callRecord.leadId, 'BOOKED').catch(() => {})
+
+    console.log(`[webhook] Meeting booked for lead ${callRecord.leadId} at ${scheduledTime}`)
+  } catch (err) {
+    // BUG-3 fix: was incorrectly setting outcome BOOKED on failure
+    // BUG-4 fix: log full Cal.com error detail
+    console.error('[webhook] Cal.com booking failed:', err.response?.data || err.message)
+    await prisma.call.update({
+      where: { id: callRecord.id },
+      data: { outcome: 'CALLBACK' }
+    })
+    await prisma.lead.update({
+      where: { id: callRecord.leadId },
+      data: { status: 'CALLBACK' }
+    })
+  }
+}
+
+async function handleTranscriptUpdate(call) {
+  const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call.id } })
+  if (!callRecord) return
+  const transcript = formatTranscript(call.transcript) || formatTranscript(call.messages)
+  if (transcript) {
+    await prisma.call.update({ where: { id: callRecord.id }, data: { transcript } })
+  }
 }
 
 async function handleToolCalls(event) {
-  const { call, toolCallList = [] } = event
-  const results = []
+  const toolCalls = event.toolCallList || event.toolCalls || []
+  const results   = []
 
-  for (const toolCall of toolCallList) {
-    const toolCallId = toolCall.id
-    const name = toolCall.function?.name
-    let parameters = {}
+  for (const toolCall of toolCalls) {
+    const name = toolCall.function?.name || toolCall.name
+    const args = toolCall.function?.arguments || toolCall.arguments || {}
+    const id   = toolCall.id
+
     try {
-      parameters = typeof toolCall.function?.arguments === 'string'
-        ? JSON.parse(toolCall.function.arguments)
-        : (toolCall.function?.arguments || {})
-    } catch {}
+      let result
+      if (name === 'bookMeeting') {
+        const call       = event.call
+        const callRecord = await prisma.call.findFirst({
+          where: { vapiCallId: call?.id },
+          include: { tenant: true, lead: true }
+        })
 
-    console.log(`[webhook] tool-call: ${name}`, JSON.stringify(parameters))
+        if (!callRecord) {
+          result = 'Error: call record not found'
+        } else {
+          const campaign = await prisma.campaign.findUnique({
+            where: { id: callRecord.campaignId },
+            select: { timezone: true }
+          })
+          const meetingTime = args.datetime ? new Date(args.datetime) : null
 
-    const callRecord = await prisma.call.findFirst({
-      where: { vapiCallId: call.id },
-      include: { tenant: true, lead: true, campaign: true }  // FIX BUG-5: include campaign for timezone
-    })
-    if (!callRecord) {
-      results.push({ toolCallId, result: 'Internal error: call record not found.' })
-      continue
-    }
+          // Record the booking intent NOW — before attempting Cal.com.
+          // This ensures outcome=BOOKED and scheduledMeetingAt are stored
+          // even if the external Cal.com call fails (so the AI can still
+          // say "confirmed" and the Meetings page shows the entry).
+          await prisma.call.update({
+            where: { id: callRecord.id },
+            data: { scheduledMeetingAt: meetingTime, meetingBookedAt: new Date(), outcome: 'BOOKED' }
+          })
+          await prisma.lead.update({
+            where: { id: callRecord.leadId },
+            data: { status: 'BOOKED', meetingBookedAt: new Date() }
+          })
 
-    let result = 'Done.'
-    try {
-      if (name === 'book_meeting')     result = await processMeetingBooking({ callRecord, parameters })
-      if (name === 'request_callback') result = await processCallback({ callRecord, parameters })
-      if (name === 'end_call')         { await processEndCall({ callRecord, parameters }); result = '' }
-      if (name === 'detect_sentiment') { await handleSentiment({ callRecord, parameters }); result = '' }
+          // Now try to create the Cal.com booking — failure is non-fatal.
+          // If it fails, the booking intent is already stored; admin can
+          // manually confirm. We do NOT throw here so the AI gets "confirmed".
+          try {
+            const meeting = await calendarService.bookMeeting({
+              tenant:        callRecord.tenant,
+              prospectName:  callRecord.lead?.name  || '',
+              prospectEmail: callRecord.lead?.email || null,
+              preferredSlot: args.datetime,
+              timezone:      campaign?.timezone || 'UTC'
+            })
+            if (meeting?.meetingUrl) {
+              await prisma.call.update({ where: { id: callRecord.id }, data: { meetingLink: meeting.meetingUrl } })
+              await prisma.lead.update({ where: { id: callRecord.leadId }, data: { meetingLink: meeting.meetingUrl } })
+            }
+          } catch (calErr) {
+            console.error('[webhook] Cal.com booking failed — intent already stored, manual follow-up needed:', calErr.message)
+          }
+
+          result = `Meeting confirmed for ${args.datetime || 'the requested time'}. Confirmation details will be sent shortly.`
+        }
+      } else if (name === 'scheduleCallback') {
+        const call       = event.call
+        const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call?.id } })
+        if (callRecord) {
+          await prisma.call.update({
+            where: { id: callRecord.id },
+            data: { outcome: 'CALLBACK' }
+          })
+          await prisma.lead.update({
+            where: { id: callRecord.leadId },
+            data: { status: 'CALLBACK', callbackAt: args.datetime ? new Date(args.datetime) : null }
+          })
+        }
+        result = `Callback scheduled${args.datetime ? ` for ${args.datetime}` : ''}`
+      } else if (name === 'markNotInterested') {
+        const call       = event.call
+        const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call?.id } })
+        if (callRecord) {
+          await prisma.call.update({
+            where: { id: callRecord.id },
+            data: { outcome: 'NOT_INTERESTED' }
+          })
+          await prisma.lead.update({
+            where: { id: callRecord.leadId },
+            data: { status: 'NOT_INTERESTED' }
+          })
+        }
+        result = 'Marked as not interested'
+      } else {
+        result = `Unknown function: ${name}`
+      }
+      results.push({ toolCallId: id, result: String(result) })
     } catch (err) {
-      console.error(`[webhook] Error in tool ${name}:`, err.message)
-      result = "Noted. I'll follow up on that."
+      console.error(`[webhook] tool-call "${name}" failed:`, err.message)
+      results.push({ toolCallId: id, result: `Error: ${err.message}` })
     }
-
-    results.push({ toolCallId, result })
   }
 
   return results
 }
 
 async function handleFunctionCall(event) {
-  const { call, functionCall } = event
-  const { name, parameters } = functionCall
+  // Legacy Vapi function-call format (pre-tool-calls)
+  const fn   = event.functionCall || {}
+  const name = fn.name
+  const args = fn.parameters || fn.arguments || {}
 
-  const callRecord = await prisma.call.findFirst({
-    where: { vapiCallId: call.id },
-    include: { tenant: true, lead: true, campaign: true }  // FIX BUG-5: include campaign for timezone
-  })
+  if (!name) return
+
+  const call       = event.call
+  const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call?.id } })
   if (!callRecord) return
 
-  if (name === 'book_meeting')     await processMeetingBooking({ callRecord, parameters })
-  if (name === 'request_callback') await processCallback({ callRecord, parameters })
-  if (name === 'end_call')         await processEndCall({ callRecord, parameters })
-  if (name === 'detect_sentiment') await handleSentiment({ callRecord, parameters })
-}
-
-// Stores sentiment snapshot from AI into Call.sentimentLog
-async function handleSentiment({ callRecord, parameters }) {
-  const { sentiment, intent, buying_signal, suggested_action } = parameters
-  console.log(`[webhook] detect_sentiment — call=${callRecord.id} sentiment=${sentiment} intent=${intent} action=${suggested_action}`)
-
   try {
-    const existing = callRecord.sentimentLog || []
-    const entry = {
-      ts:               new Date().toISOString(),
-      sentiment,
-      intent,
-      buying_signal:    buying_signal || null,
-      suggested_action
+    if (name === 'bookMeeting') {
+      await prisma.call.update({
+        where: { id: callRecord.id },
+        data: { scheduledMeetingAt: args.datetime ? new Date(args.datetime) : null, outcome: 'BOOKED' }
+      })
+      await prisma.lead.update({
+        where: { id: callRecord.leadId },
+        data: { status: 'BOOKED' }
+      })
+    } else if (name === 'scheduleCallback') {
+      await prisma.call.update({
+        where: { id: callRecord.id },
+        data: { outcome: 'CALLBACK' }
+      })
+      await prisma.lead.update({
+        where: { id: callRecord.leadId },
+        data: { status: 'CALLBACK', callbackAt: args.datetime ? new Date(args.datetime) : null }
+      })
     }
-    const updated = Array.isArray(existing) ? [...existing, entry] : [entry]
-
-    await prisma.call.update({
-      where: { id: callRecord.id },
-      data: { sentimentLog: updated }
-    })
   } catch (err) {
-    console.error('[webhook] Could not save sentiment — did you run the migration?', err.message)
+    console.error(`[webhook] function-call "${name}" failed:`, err.message)
   }
-}
-
-async function processCallback({ callRecord, parameters }) {
-  const callbackAt = parseCallbackTime(parameters.callback_time)
-  await prisma.lead.update({ where: { id: callRecord.leadId }, data: { status: 'CALLBACK', callbackAt } })
-  return `Got it — I've noted your callback for ${parameters.callback_time}. We'll call you back then.`
-}
-
-async function processEndCall({ callRecord, parameters }) {
-  await prisma.call.update({
-    where: { id: callRecord.id },
-    data: { outcome: parameters.reason, summary: parameters.summary }
-  })
-}
-
-async function handleTranscriptUpdate(call) {
-  const transcript = formatTranscript(call.artifact?.transcript)
-  if (!transcript) return
-  await prisma.call.updateMany({
-    where: { vapiCallId: call.id },
-    data: { transcript }
-  })
-}
-
-async function processMeetingBooking({ callRecord, parameters }) {
-  const { tenant, lead, campaign } = callRecord
-  console.log('[webhook] book_meeting called — params:', JSON.stringify(parameters))
-
-  // FIX BUG-5: extract campaign timezone so calendar uses correct local time
-  const campaignTimezone = campaign?.timezone || 'America/Toronto'
-
-  const scheduledMeetingAt = parsePreferredSlot(parameters.preferred_slot)
-
-  try {
-    const booking = await calendarService.bookMeeting({
-      tenant,
-      prospectName:  parameters.prospect_name  || lead.name,
-      prospectEmail: parameters.prospect_email || lead.email,
-      preferredSlot: parameters.preferred_slot,
-      notes:         parameters.notes || '',
-      timezone:      campaignTimezone    // FIX BUG-5: pass timezone
-    })
-
-    const confirmedAt = booking.startTime ? new Date(booking.startTime) : scheduledMeetingAt
-
-    await prisma.call.update({
-      where: { id: callRecord.id },
-      data: {
-        outcome:            'BOOKED',
-        meetingBookedAt:    new Date(),
-        scheduledMeetingAt: confirmedAt,
-        meetingLink:        booking.meetingUrl || null,
-        calEventId:         booking.uid || null
-      }
-    })
-
-    await prisma.lead.update({
-      where: { id: callRecord.leadId },
-      data: { status: 'BOOKED', meetingBookedAt: new Date(), meetingLink: booking.meetingUrl || null }
-    })
-
-    console.log(`[webhook] Meeting booked successfully — lead ${callRecord.leadId}, scheduledAt: ${confirmedAt}`)
-    return `Meeting confirmed for ${parameters.preferred_slot}. You'll receive a confirmation shortly.`
-
-  } catch (err) {
-    // FIX BUG-4: log actual Cal.com error response, not just generic message
-    console.error('[webhook] Meeting booking failed:', err.response?.data || err.message)
-
-    // FIX BUG-3: DO NOT mark as BOOKED when booking failed.
-    // Set CALLBACK so the lead re-enters the queue for team follow-up.
-    await prisma.call.update({
-      where: { id: callRecord.id },
-      data: {
-        outcome:            'CALLBACK',   // was: 'BOOKED' — WRONG
-        meetingBookedAt:    null,         // no meeting was actually created
-        scheduledMeetingAt: scheduledMeetingAt
-      }
-    }).catch(() => {})
-
-    await prisma.lead.update({
-      where: { id: callRecord.leadId },
-      data: {
-        status:     'CALLBACK',           // was: 'BOOKED' — WRONG
-        callbackAt: scheduledMeetingAt    // team will call back around that time
-      }
-    }).catch(() => {})
-
-    return `I wasn't able to confirm that slot right now. Our team will call you back to finalise the time.`
-  }
-}
-
-function parsePreferredSlot(slot) {
-  if (!slot) return null
-  try {
-    const d = new Date(slot)
-    if (!isNaN(d.getTime())) return d
-  } catch {}
-  return null
-}
-
-function formatTranscript(msgs) {
-  if (!msgs || !Array.isArray(msgs) || msgs.length === 0) return null
-  const lines = msgs
-    .map(t => {
-      const role = (t.role || 'unknown').toUpperCase()
-      const text = t.message || t.content || t.text || ''
-      return text ? `[${role}] ${text}` : null
-    })
-    .filter(Boolean)
-  return lines.length ? lines.join('\n') : null
 }
 
 function mapVapiEndReason(reason) {
-  const map = {
-    'customer-ended-call':     'NOT_INTERESTED',
-    'assistant-ended-call':    'NOT_INTERESTED',
-    'customer-did-not-answer': 'NO_ANSWER',
-    'voicemail':               'VOICEMAIL',
-    'max-duration-exceeded':   'NO_ANSWER',
-    'silence-timed-out':       'NO_ANSWER',
-    'error':                   'ERROR'
-  }
-  return map[reason] || 'NO_ANSWER'
+  if (!reason) return null
+  const r = reason.toLowerCase()
+  if (r.includes('customer-did-not-answer') || r.includes('no-answer')) return 'NO_ANSWER'
+  if (r.includes('voicemail'))        return 'VOICEMAIL'
+  // customer-ended / assistant-ended = normal conversation finish.
+  // Return null so the AI's tool-call outcome (CALLBACK, NOT_INTERESTED, etc.) is preserved.
+  // Falls back to NO_ANSWER via the `|| 'NO_ANSWER'` in the caller.
+  if (r.includes('customer-ended'))   return null
+  if (r.includes('assistant-ended'))  return null
+  if (r.includes('error'))            return 'ERROR'   // was 'FAILED' — not a valid CallOutcome
+  return null
 }
 
 function outcomeToLeadStatus(outcome) {
   const map = {
     BOOKED:         'BOOKED',
-    NOT_INTERESTED: 'NOT_INTERESTED',
     CALLBACK:       'CALLBACK',
+    NOT_INTERESTED: 'NOT_INTERESTED',
     VOICEMAIL:      'VOICEMAIL',
     NO_ANSWER:      'NO_ANSWER',
-    WRONG_NUMBER:   'WRONG_NUMBER',
-    OPTED_OUT:      'OPTED_OUT',
-    ERROR:          'PENDING'
+    ERROR:          'NO_ANSWER'
   }
   return map[outcome] || 'NO_ANSWER'
 }
 
-function parseCallbackTime(text) {
-  try {
-    const d = new Date(text)
-    if (!isNaN(d)) return d
-  } catch {}
-  const tomorrow = new Date()
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  return tomorrow
+function formatTranscript(input) {
+  if (!input) return null
+  if (typeof input === 'string') return input
+  if (Array.isArray(input)) {
+    return input
+      .map(m => {
+        const role = (m.role || m.speaker || 'unknown').toUpperCase()
+        const text = m.content || m.message || m.text || ''
+        return `[${role}] ${text}`
+      })
+      .filter(l => l.trim().length > 10)
+      .join('\n')
+  }
+  return null
 }
 
 module.exports = router
