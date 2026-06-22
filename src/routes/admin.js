@@ -403,12 +403,17 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
     const compiledPrompt = scriptService.compileSystemPrompt(script)
 
     // Create/update assistant in Vapi with compiled prompt
+    // FIX BUG-F: agentGender was never passed here, so upsertAssistant's
+    // default ('female') silently overrode whatever the client actually
+    // configured. Every approved assistant used female Hindi/Punjabi verb
+    // forms regardless of the script's real agentGender setting.
     const vapiAssistantId = await vapiService.upsertAssistant({
       name: `${script.agentName} — ${script.id}`,
       systemPrompt: compiledPrompt,
       voiceId: script.voiceId,
       agentName: script.agentName,
-      language: script.language || 'en'
+      language: script.language || 'en',
+      agentGender: script.agentGender || 'female'
     })
 
     const updated = await prisma.script.update({
@@ -440,15 +445,19 @@ router.post('/scripts/:id/resync', async (req, res, next) => {
       existingAssistantId = stored.vapiAssistantId || null
     } catch {}
 
-    console.log('[resync] scriptId=', script.id, 'existingAssistantId=', existingAssistantId)
+    console.log('[resync] scriptId=', script.id, 'existingAssistantId=', existingAssistantId, 'agentGender=', script.agentGender)
 
     const compiledPrompt = scriptService.compileSystemPrompt(script)
+    // FIX BUG-F: same missing agentGender as /approve above — resync is the
+    // button the team actually clicks to push a fix live, so this was the
+    // reason re-syncing never changed the agent's gendered speech.
     const vapiAssistantId = await vapiService.upsertAssistant({
       name: `${script.agentName} — ${script.id}`,
       systemPrompt: compiledPrompt,
       voiceId: script.voiceId,
       agentName: script.agentName,
       language: script.language || 'en',
+      agentGender: script.agentGender || 'female',
       existingAssistantId
     })
 

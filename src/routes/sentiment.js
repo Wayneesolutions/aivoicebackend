@@ -77,7 +77,7 @@ router.get('/call/:callId', verifyToken, async (req, res, next) => {
 // Admin: sees all tenants. Tenant user: own tenant only.
 router.get('/active', verifyToken, async (req, res, next) => {
   try {
-    const cutoff = new Date(Date.now() - 30 * 60 * 1000)
+    const cutoff = new Date(Date.now() - 15 * 60 * 1000) // 15 min — calls older than this without an end webhook are stale
 
     // FIX: build where clause based on role
     const where = {

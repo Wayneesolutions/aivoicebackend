@@ -255,7 +255,13 @@ async function handleCallEnded(event) {
   })
 
   if (billedMinutes > 0) {
-    await billingService.recordUsage(callRecord.tenantId, billedMinutes, billedAmount).catch(err =>
+    await billingService.logUsage({
+      tenantId:      callRecord.tenantId,
+      callId:        callRecord.id,
+      minutes:       billedMinutes,
+      ratePerMinute: callRecord.tenant.ratePerMinute,
+      amount:        billedAmount
+    }).catch(err =>
       console.error('[webhook] billing record failed:', err.message)
     )
   }
@@ -357,7 +363,9 @@ async function handleToolCalls(event) {
 
     try {
       let result
-      if (name === 'bookMeeting') {
+      // book_meeting = snake_case name from script.js tool definitions
+      // bookMeeting  = legacy camelCase — keep both so old assistants still work
+      if (name === 'bookMeeting' || name === 'book_meeting') {
         const call       = event.call
         const callRecord = await prisma.call.findFirst({
           where: { vapiCallId: call?.id },
@@ -371,12 +379,12 @@ async function handleToolCalls(event) {
             where: { id: callRecord.campaignId },
             select: { timezone: true }
           })
-          const meetingTime = args.datetime ? new Date(args.datetime) : null
+          // book_meeting passes preferred_slot; legacy bookMeeting passed datetime
+          const slotRaw   = args.preferred_slot || args.datetime || null
+          const meetingTime = slotRaw ? new Date(slotRaw) : null
+          // book_meeting can pass prospect_email directly from what the agent collected
+          const prospectEmail = args.prospect_email || callRecord.lead?.email || null
 
-          // Record the booking intent NOW — before attempting Cal.com.
-          // This ensures outcome=BOOKED and scheduledMeetingAt are stored
-          // even if the external Cal.com call fails (so the AI can still
-          // say "confirmed" and the Meetings page shows the entry).
           await prisma.call.update({
             where: { id: callRecord.id },
             data: { scheduledMeetingAt: meetingTime, meetingBookedAt: new Date(), outcome: 'BOOKED' }
@@ -386,15 +394,12 @@ async function handleToolCalls(event) {
             data: { status: 'BOOKED', meetingBookedAt: new Date() }
           })
 
-          // Now try to create the Cal.com booking — failure is non-fatal.
-          // If it fails, the booking intent is already stored; admin can
-          // manually confirm. We do NOT throw here so the AI gets "confirmed".
           try {
             const meeting = await calendarService.bookMeeting({
               tenant:        callRecord.tenant,
-              prospectName:  callRecord.lead?.name  || '',
-              prospectEmail: callRecord.lead?.email || null,
-              preferredSlot: args.datetime,
+              prospectName:  args.prospect_name || callRecord.lead?.name || '',
+              prospectEmail,
+              preferredSlot: slotRaw,
               timezone:      campaign?.timezone || 'UTC'
             })
             if (meeting?.meetingUrl) {
@@ -405,11 +410,13 @@ async function handleToolCalls(event) {
             console.error('[webhook] Cal.com booking failed — intent already stored, manual follow-up needed:', calErr.message)
           }
 
-          result = `Meeting confirmed for ${args.datetime || 'the requested time'}. Confirmation details will be sent shortly.`
+          result = `Meeting confirmed for ${slotRaw || 'the requested time'}. Confirmation details will be sent shortly.`
         }
-      } else if (name === 'scheduleCallback') {
+      } else if (name === 'scheduleCallback' || name === 'request_callback') {
         const call       = event.call
         const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call?.id } })
+        // request_callback passes callback_time; legacy scheduleCallback passed datetime
+        const callbackRaw = args.callback_time || args.datetime || null
         if (callRecord) {
           await prisma.call.update({
             where: { id: callRecord.id },
@@ -417,10 +424,10 @@ async function handleToolCalls(event) {
           })
           await prisma.lead.update({
             where: { id: callRecord.leadId },
-            data: { status: 'CALLBACK', callbackAt: args.datetime ? new Date(args.datetime) : null }
+            data: { status: 'CALLBACK', callbackAt: callbackRaw ? new Date(callbackRaw) : null }
           })
         }
-        result = `Callback scheduled${args.datetime ? ` for ${args.datetime}` : ''}`
+        result = `Callback scheduled${callbackRaw ? ` for ${callbackRaw}` : ''}`
       } else if (name === 'markNotInterested') {
         const call       = event.call
         const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call?.id } })
@@ -435,6 +442,25 @@ async function handleToolCalls(event) {
           })
         }
         result = 'Marked as not interested'
+      } else if (name === 'detect_sentiment') {
+        // Store mid-call sentiment entry so the live dashboard updates in real time
+        const call       = event.call
+        const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call?.id } })
+        if (callRecord) {
+          const existing = Array.isArray(callRecord.sentimentLog) ? callRecord.sentimentLog : []
+          const entry = {
+            t:                Date.now(),
+            sentiment:        args.sentiment        || 'UNKNOWN',
+            intent:           args.intent           || 'UNKNOWN',
+            buying_signal:    args.buying_signal    || null,
+            suggested_action: args.suggested_action || null
+          }
+          await prisma.call.update({
+            where: { id: callRecord.id },
+            data:  { sentimentLog: [...existing, entry] }
+          })
+        }
+        result = 'ok'
       } else {
         result = `Unknown function: ${name}`
       }

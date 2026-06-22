@@ -41,7 +41,7 @@ const schedulerQueue = new Queue('dial-scheduler', { connection })
 const callQueue      = new Queue('dial-calls',     { connection })
 
 async function cleanupStaleCalls() {
-  const cutoff = new Date(Date.now() - 30 * 60 * 1000) // 30 min
+  const cutoff = new Date(Date.now() - 15 * 60 * 1000) // 15 min — any AI call stuck longer than this means Vapi never sent end-of-call-report
   const stale = await prisma.call.findMany({
     where: {
       status: { in: ['IN_PROGRESS', 'RINGING', 'INITIATED'] },
@@ -49,7 +49,7 @@ async function cleanupStaleCalls() {
     }
   })
   if (stale.length === 0) return
-  console.log(`[dialQueue] Cleaning up ${stale.length} stale call(s) > 60min`)
+  console.log(`[dialQueue] Cleaning up ${stale.length} stale call(s) older than 15 min — Vapi end webhook likely never arrived`)
   for (const call of stale) {
     await prisma.call.update({
       where: { id: call.id },
@@ -304,6 +304,10 @@ let schedulerWorker = null
 let callWorker = null
 
 async function startWorker() {
+  // Run cleanup immediately on startup — catches stale calls from any previous session
+  // where the server was restarted without Vapi sending end-of-call-report webhooks
+  await cleanupStaleCalls().catch(err => console.error('[dialQueue] Startup cleanup failed:', err.message))
+
   await schedulerQueue.add('scan-campaigns', {}, {
     repeat: { every: 5 * 60 * 1000 },
     jobId: 'recurring-scan'

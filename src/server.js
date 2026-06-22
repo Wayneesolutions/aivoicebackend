@@ -15,6 +15,7 @@ const helmet  = require('helmet')
 const rateLimit = require('express-rate-limit')
 const { createServer } = require('http')
 const morgan  = require('morgan')
+const axios   = require('axios')
 
 const app        = express()
 const httpServer = createServer(app)
@@ -73,10 +74,53 @@ app.use((err, req, res, next) => {
   })
 })
 
+// FIX BUG-G: confirm BASE_URL is actually reachable from the public
+// internet (i.e. it's a live tunnel, not a stale/placeholder value)
+// BEFORE accepting calls — and confirm it matches what's actually
+// configured on Vapi's side for every approved assistant. This is a
+// dev-environment safety net; in production BASE_URL should be a
+// stable domain and this just confirms /health responds through it.
+async function verifyBaseUrlReachable() {
+  const baseUrl = process.env.BASE_URL
+
+  console.log('========================================')
+  console.log(`[startup] BASE_URL = ${baseUrl || '(not set)'}`)
+
+  if (!baseUrl || baseUrl.includes('yourdomain.com')) {
+    console.error('[startup] ⚠️  BASE_URL is missing or still the placeholder from .env.example.')
+    console.error('[startup] ⚠️  Vapi cannot reach this server — webhooks (call duration, call storage,')
+    console.error('[startup] ⚠️  booking confirmations) will silently fail to arrive. If you are running')
+    console.error('[startup] ⚠️  locally, use "npm run dev" (NOT "npm start") so the Cloudflare tunnel')
+    console.error('[startup] ⚠️  starts and BASE_URL gets set automatically.')
+    console.error('========================================')
+    return
+  }
+
+  try {
+    const res = await axios.get(`${baseUrl}/health`, { timeout: 8000 })
+    if (res.data?.status === 'ok') {
+      console.log(`[startup] ✅ BASE_URL is reachable — confirmed /health responded through ${baseUrl}`)
+    } else {
+      console.error(`[startup] ⚠️  BASE_URL responded but with unexpected content: ${JSON.stringify(res.data)}`)
+    }
+  } catch (err) {
+    console.error('[startup] ❌ BASE_URL is NOT reachable from the public internet:', err.message)
+    console.error('[startup] ❌ This almost always means: the tunnel from a PREVIOUS "npm run dev" session')
+    console.error('[startup] ❌ has died (tunnel URLs are random and expire every restart), but this server')
+    console.error('[startup] ❌ was started with the old BASE_URL still in .env — e.g. via "npm start"')
+    console.error('[startup] ❌ instead of "npm run dev", which skips the tunnel + re-patch step entirely.')
+    console.error('[startup] ❌ FIX: stop this server, run "npm run dev" instead, let it print a fresh')
+    console.error('[startup] ❌ "[start-dev] Updated Vapi assistant ... → https://NEW-URL.trycloudflare.com"')
+    console.error('[startup] ❌ line for EVERY approved script, then test again.')
+  }
+  console.log('========================================')
+}
+
 const PORT = process.env.PORT || 3001
 httpServer.listen(PORT, () => {
   console.log(`VoCallM backend running on port ${PORT}`)
   require('./workers/dialQueue').startWorker()
+  verifyBaseUrlReachable()
 })
 
 httpServer.on('error', (err) => {
