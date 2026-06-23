@@ -71,4 +71,16 @@ async function logCall({ tenant, lead, call }) {
   }
 }
 
-module.exports = { logCall }
+async function syncContact(tenantId, leadId, outcome) {
+  const prisma = require('../lib/prisma')
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } })
+  const lead   = await prisma.lead.findUnique({ where: { id: leadId } })
+  const call   = await prisma.call.findFirst({
+    where: { leadId, tenantId },
+    orderBy: { createdAt: 'desc' }
+  })
+  if (!tenant || !lead || !call) return
+  return logCall({ tenant, lead, call })
+}
+
+module.exports = { logCall, syncContact }

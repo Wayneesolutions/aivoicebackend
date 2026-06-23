@@ -69,7 +69,7 @@ RULES (follow every one):
 - Always respond to what they just said before moving forward.
 - After every point, ask ONE question. Never two.
 - Natural filler words: "Sure", "Got it", "That makes sense".
-- If asked "Are you AI?" or "Are you a robot?": Redirect naturally — say "I'm [your name] calling from Wayne Solutions, I just wanted to quickly connect with you about [topic]" and continue without confirming or denying.
+- If asked "Are you AI?" or "Are you a robot?": Redirect naturally — say "I'm [your name], I'm just calling to connect with you about [topic]" and continue without confirming or denying.
 - Before booking: always ask for email first if not given ("What email should I send the confirmation to?").
 - Book meeting: use book_meeting function immediately when they agree. Offer 2 time slots.
 - End call: use end_call when booked, clearly not interested, or voicemail.
@@ -123,10 +123,24 @@ function getVapiFunctions() {
       server: { url: serverUrl, secret: serverSecret }
     },
     {
+      type: 'function',
+      function: {
+        name: 'markNotInterested',
+        description: 'Mark prospect as not interested. Call when they say no, remove me, not interested, or stop calling.',
+        parameters: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string', description: 'Brief reason they gave' }
+          }
+        }
+      },
+      server: { url: serverUrl, secret: serverSecret }
+    },
+    {
       type: 'endCall',
       function: {
         name: 'end_call',
-        description: 'End the call. Use when meeting is booked, not interested, asked to be removed, or voicemail.',
+        description: 'End the call. Use ONLY when booked, callback, voicemail, or wrong number. For not interested, call markNotInterested first, then end_call.',
         parameters: {
           type: 'object',
           properties: {

@@ -365,6 +365,13 @@ router.post('/tenants/:id/numbers', async (req, res, next) => {
 // DELETE /api/admin/numbers/:numberId
 router.delete('/numbers/:numberId', async (req, res, next) => {
   try {
+    const phone = await prisma.tenantPhone.findUnique({ where: { id: req.params.numberId } })
+    if (phone) {
+      await phoneProviders.releaseNumber({
+        provider: phone.provider, twilioSid: phone.twilioSid,
+        plivoUuid: phone.plivoUuid, vapiNumberId: phone.vapiNumberId
+      })
+    }
     await prisma.tenantPhone.delete({ where: { id: req.params.numberId } })
     res.json({ message: 'Number removed' })
   } catch (err) { next(err) }
@@ -373,6 +380,13 @@ router.delete('/numbers/:numberId', async (req, res, next) => {
 // DELETE /api/admin/tenants/:tenantId/numbers/:numberId (backwards compat)
 router.delete('/tenants/:tenantId/numbers/:numberId', async (req, res, next) => {
   try {
+    const phone = await prisma.tenantPhone.findUnique({ where: { id: req.params.numberId } })
+    if (phone) {
+      await phoneProviders.releaseNumber({
+        provider: phone.provider, twilioSid: phone.twilioSid,
+        plivoUuid: phone.plivoUuid, vapiNumberId: phone.vapiNumberId
+      })
+    }
     await prisma.tenantPhone.delete({ where: { id: req.params.numberId } })
     res.json({ message: 'Number removed' })
   } catch (err) { next(err) }

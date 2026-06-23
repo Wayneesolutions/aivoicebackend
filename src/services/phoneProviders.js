@@ -130,4 +130,19 @@ async function buyAndRegister({ provider, number }) {
   return { twilioSid, plivoUuid, vapiNumberId }
 }
 
-module.exports = { searchAvailable, buyAndRegister }
+async function releaseNumber({ provider, twilioSid, plivoUuid, vapiNumberId }) {
+  if (vapiNumberId) {
+    await vapiClient.delete(`/phone-number/${vapiNumberId}`)
+      .catch(e => console.error('[phoneProviders] Vapi release failed:', e.message))
+  }
+  if (provider === 'TWILIO' && twilioSid) {
+    await getTwilioClient().incomingPhoneNumbers(twilioSid).remove()
+      .catch(e => console.error('[phoneProviders] Twilio release failed:', e.message))
+  }
+  if (provider === 'PLIVO' && plivoUuid) {
+    await getPlivoClient().numbers.unrent(plivoUuid.replace('+', ''))
+      .catch(e => console.error('[phoneProviders] Plivo release failed:', e.message))
+  }
+}
+
+module.exports = { searchAvailable, buyAndRegister, releaseNumber }
