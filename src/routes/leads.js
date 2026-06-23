@@ -2,6 +2,7 @@
 const router = require('express').Router()
 const multer = require('multer')
 const { parse } = require('csv-parse/sync')
+const XLSX = require('xlsx')
 const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
@@ -44,14 +45,23 @@ router.get('/unassigned-count', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// POST /api/leads/upload — CSV upload
+function parseFileToRows(buffer, originalname) {
+  const ext = (originalname || '').split('.').pop().toLowerCase()
+  if (ext === 'xlsx' || ext === 'xls') {
+    const wb = XLSX.read(buffer, { type: 'buffer' })
+    const ws = wb.Sheets[wb.SheetNames[0]]
+    return XLSX.utils.sheet_to_json(ws, { defval: '' })
+  }
+  return parse(buffer.toString('utf8'), { columns: true, skip_empty_lines: true, trim: true })
+}
+
+// POST /api/leads/upload — CSV or XLSX upload
 router.post('/upload', requireTenantOwner, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
     const { campaignId } = req.body
 
-    const content = req.file.buffer.toString('utf8')
-    const rows = parse(content, { columns: true, skip_empty_lines: true, trim: true })
+    const rows = parseFileToRows(req.file.buffer, req.file.originalname)
 
     const results = { imported: 0, skipped: 0, errors: [] }
     const toCreate = []
