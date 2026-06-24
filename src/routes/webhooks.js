@@ -553,4 +553,153 @@ function formatTranscript(input) {
   return null
 }
 
+// ── Inbound Vapi Webhook (/api/webhooks/vapi-inbound) ─────────────────────────
+// Receives assistant-request, call-started, end-of-call-report for inbound calls.
+const inboundSummary      = require('../services/inboundSummary');
+const inboundNotification = require('../services/inboundNotification');
+const inboundVapi         = require('../services/inboundVapi');
+
+router.post('/vapi-inbound', async (req, res) => {
+  const bodyStr = req.body.toString();
+
+  // Reuse same signature verification as outbound
+  const authResult = verifyVapiRequest(req, bodyStr);
+  if (!authResult.ok) {
+    console.error('[webhook/vapi-inbound] AUTH REJECTED:', authResult.method);
+    return res.status(401).json({ error: 'Invalid webhook signature' });
+  }
+
+  let event, type;
+  try {
+    const raw = JSON.parse(bodyStr);
+    event = raw.message || raw;
+    type  = event.type;
+  } catch {
+    return res.status(200).json({ received: true });
+  }
+
+  console.log('[webhook/vapi-inbound] TYPE:', type);
+
+  // Respond immediately — process async
+  res.status(200).json({ received: true });
+
+  try {
+    switch (type) {
+
+      // Vapi asks which assistant to use for this inbound number
+      case 'assistant-request': {
+        const calledNumber = event.call?.phoneNumberId || event.phoneNumber?.number;
+        if (!calledNumber) break;
+
+        const phone = await prisma.inboundPhoneNumber.findFirst({
+          where: {
+            OR: [{ phoneNumber: calledNumber }, { vapiPhoneId: calledNumber }],
+            isActive: true,
+            tenantId: { not: undefined },
+          },
+          include: {
+            assistants: {
+              where: { status: 'active' },
+              orderBy: { updatedAt: 'desc' },
+              take: 1,
+            }
+          }
+        });
+
+        if (!phone || !phone.assistants.length) {
+          console.warn('[webhook/vapi-inbound] No active assistant for number:', calledNumber);
+          break;
+        }
+        // Note: for assistant-request Vapi expects a synchronous response.
+        // We already sent 200 above — Vapi will use the vapiAssistantId linked at activation time.
+        break;
+      }
+
+      case 'call-started': {
+        const call = event.call || {};
+        const calledNumber = call.phoneNumberId || call.phoneNumber?.number;
+
+        const phone = await prisma.inboundPhoneNumber.findFirst({
+          where: { OR: [{ phoneNumber: calledNumber }, { vapiPhoneId: calledNumber }] },
+          include: { assistants: { where: { status: 'active' }, take: 1 } }
+        });
+
+        if (phone && phone.assistants.length) {
+          await prisma.inboundCall.upsert({
+            where:  { vapiCallId: call.id || `missing-${Date.now()}` },
+            create: {
+              tenantId:     phone.tenantId,
+              assistantId:  phone.assistants[0].id,
+              phoneNumberId: phone.id,
+              vapiCallId:   call.id,
+              callerNumber: call.customer?.number,
+              calledNumber,
+              startedAt:    new Date(),
+            },
+            update: {},
+          });
+        }
+        break;
+      }
+
+      case 'end-of-call-report': {
+        const report      = event;
+        const vapiCallId  = report.call?.id || report.callId;
+        const transcript  = report.artifact?.transcript || report.transcript || [];
+        const recordingUrl = report.artifact?.recordingUrl || report.recordingUrl || null;
+        const costUsd     = report.cost || null;
+
+        const endedAt   = report.call?.endedAt ? new Date(report.call.endedAt) : new Date();
+        const startedAt = report.call?.startedAt ? new Date(report.call.startedAt) : null;
+        const durationSeconds = startedAt
+          ? Math.max(0, Math.round((endedAt - startedAt) / 1000))
+          : 0;
+
+        const callRecord = await prisma.inboundCall.findFirst({
+          where: { vapiCallId },
+          include: { assistant: true, tenant: true }
+        });
+        if (!callRecord) break;
+
+        const { summary, outcome } = inboundSummary.extractSummaryAndOutcome({
+          analysis:    report.analysis || report.call?.analysis || {},
+          endedReason: report.call?.endedReason || report.endedReason,
+        });
+
+        await prisma.inboundCall.update({
+          where: { id: callRecord.id },
+          data: {
+            endedAt:         new Date(),
+            durationSeconds,
+            outcome,
+            summary,
+            transcript:      Array.isArray(transcript) ? transcript : [],
+            recordingUrl,
+            costUsd,
+          }
+        });
+
+        if (['NO_ANSWER', 'TRANSFERRED', 'FAILED'].includes(outcome)) {
+          inboundNotification.notifyCallEnded({
+            callerNumber: callRecord.callerNumber,
+            outcome,
+            summary,
+            businessName: callRecord.assistant?.businessName || 'Business',
+            ownerWhatsapp: process.env.ADMIN_WHATSAPP,
+            duration: durationSeconds,
+          }).catch(err => console.error('[webhook/vapi-inbound] notification failed:', err.message));
+        }
+
+        console.log(`[webhook/vapi-inbound] Call ${vapiCallId} saved — outcome: ${outcome}, duration: ${durationSeconds}s`);
+        break;
+      }
+
+      default:
+        console.log('[webhook/vapi-inbound] unhandled type:', type);
+    }
+  } catch (err) {
+    console.error('[webhook/vapi-inbound] Error:', err.message, err.stack);
+  }
+});
+
 module.exports = router

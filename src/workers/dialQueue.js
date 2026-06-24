@@ -18,8 +18,9 @@ const vapiService = require('../services/vapi')
 
 const prisma = new PrismaClient()
 
-const REDIS_URL      = process.env.REDIS_URL || 'redis://localhost:6379'
-const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_CALLS || '10', 10)
+const REDIS_URL        = process.env.REDIS_URL || 'redis://localhost:6379'
+const MAX_CONCURRENT   = parseInt(process.env.MAX_CONCURRENT_CALLS || '10', 10)
+const CALLS_PER_MINUTE = parseInt(process.env.CALLS_PER_MINUTE     || '2',  10)
 
 function redisConnection() {
   try {
@@ -319,7 +320,8 @@ async function startWorker() {
 
   callWorker = new Worker('dial-calls', dialLead, {
     connection,
-    concurrency: MAX_CONCURRENT
+    concurrency: MAX_CONCURRENT,
+    limiter: { max: CALLS_PER_MINUTE, duration: 60 * 1000 }
   })
 
   callWorker.on('failed', async (job, err) => {
@@ -332,7 +334,7 @@ async function startWorker() {
     }
   })
 
-  console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, scheduler: every 5min`)
+  console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, rate: ${CALLS_PER_MINUTE}/min, scheduler: every 5min`)
 }
 
 async function triggerCampaign(campaignId) {

@@ -56,12 +56,15 @@ model Tenant {
   clonedVoiceName String?   // human-readable name the client gave it
 
   // Relations
-  phoneNumbers    TenantPhone[]
-  campaigns       Campaign[]
-  leads           Lead[]
-  calls           Call[]
-  scripts         Script[]
-  users           TenantUser[]
+  phoneNumbers         TenantPhone[]
+  campaigns            Campaign[]
+  leads                Lead[]
+  calls                Call[]
+  scripts              Script[]
+  users                TenantUser[]
+  inboundPhoneNumbers  InboundPhoneNumber[]
+  inboundAssistants    InboundAssistant[]
+  inboundCalls         InboundCall[]
 }
 
 enum TenantStatus {
@@ -360,6 +363,94 @@ model Plan {
   updatedAt       DateTime  @updatedAt
 
   tenants         Tenant[]
+}
+
+// ─────────────────────────────────────────────
+// INBOUND — Phone Numbers
+// ─────────────────────────────────────────────
+model InboundPhoneNumber {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  phoneNumber String   @unique
+  country     String   @default("CA")
+  twilioSid   String?
+  vapiPhoneId String?
+  provider    String   @default("twilio")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  assistants  InboundAssistant[]
+  calls       InboundCall[]
+}
+
+// ─────────────────────────────────────────────
+// INBOUND — AI Receptionist Config
+// ─────────────────────────────────────────────
+model InboundAssistant {
+  id            String              @id @default(cuid())
+  tenantId      String
+  tenant        Tenant              @relation(fields: [tenantId], references: [id])
+  phoneNumberId String?
+  phoneNumber   InboundPhoneNumber? @relation(fields: [phoneNumberId], references: [id])
+
+  agentName     String  @default("Alex")
+  language      String  @default("en")
+  voiceId       String?
+  agentGender   String  @default("female")
+
+  businessName    String
+  businessType    String?
+  servicesInfo    String?  @db.Text
+  faqText         String?  @db.Text
+  businessHours   Json?
+
+  transferNumber  String?
+  transferMessage String?
+  bookingUrl      String?
+  maxCallDuration Int     @default(300)
+
+  firstMessage    String?  @db.Text
+  systemPrompt    String?  @db.Text
+  vapiAssistantId String?
+
+  status        String   @default("draft")  // draft | active | paused
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  calls         InboundCall[]
+}
+
+// ─────────────────────────────────────────────
+// INBOUND — Call Records
+// ─────────────────────────────────────────────
+model InboundCall {
+  id              String              @id @default(cuid())
+  tenantId        String
+  tenant          Tenant              @relation(fields: [tenantId], references: [id])
+  assistantId     String?
+  assistant       InboundAssistant?   @relation(fields: [assistantId], references: [id])
+  phoneNumberId   String?
+  phoneNumber     InboundPhoneNumber? @relation(fields: [phoneNumberId], references: [id])
+
+  vapiCallId      String?  @unique
+  callerNumber    String?
+  calledNumber    String?
+
+  durationSeconds Int?
+  outcome         String?  // COMPLETED | TRANSFERRED | VOICEMAIL | NO_ANSWER | FAILED
+  summary         String?  @db.Text
+  transcript      Json?
+  recordingUrl    String?
+  costUsd         Float?
+
+  startedAt       DateTime?
+  endedAt         DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([createdAt])
 }
 
 // ─────────────────────────────────────────────

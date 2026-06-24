@@ -61,6 +61,12 @@ app.use('/api/stripe',    require('./routes/stripe'))
 app.use('/api/public',    require('./routes/public'))
 app.use('/api/sentiment', require('./routes/sentiment'))   // NEW — live sentiment dashboard
 
+// Inbound receptionist
+app.use('/api/inbound/phone-numbers', require('./routes/inboundPhoneNumbers'))
+app.use('/api/inbound/assistants',    require('./routes/inboundAssistants'))
+app.use('/api/inbound/calls',         require('./routes/inboundCalls'))
+app.use('/api/inbound/analytics',     require('./routes/inboundAnalytics'))
+
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok', ts: new Date() }))
 

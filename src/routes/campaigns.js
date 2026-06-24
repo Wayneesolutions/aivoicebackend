@@ -14,7 +14,21 @@ router.get('/', requireTenantUser, async (req, res, next) => {
       },
       orderBy: { createdAt: 'desc' }
     })
-    res.json(campaigns)
+
+    const ids = campaigns.map(c => c.id)
+    const outcomeRows = await prisma.call.groupBy({
+      by: ['campaignId', 'outcome'],
+      where: { campaignId: { in: ids }, status: 'COMPLETED', outcome: { not: null } },
+      _count: { id: true }
+    })
+
+    const outcomeMap = {}
+    outcomeRows.forEach(row => {
+      if (!outcomeMap[row.campaignId]) outcomeMap[row.campaignId] = {}
+      outcomeMap[row.campaignId][row.outcome] = row._count.id
+    })
+
+    res.json(campaigns.map(c => ({ ...c, outcomeCounts: outcomeMap[c.id] || {} })))
   } catch (err) { next(err) }
 })
 

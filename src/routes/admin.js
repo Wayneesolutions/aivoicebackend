@@ -27,7 +27,7 @@ router.use(requireAdmin)
 // GET /api/admin/stats
 router.get('/stats', async (req, res, next) => {
   try {
-    const [tenantCount, callsToday, minutesToday, meetingsToday] = await Promise.all([
+    const [tenantCount, callsToday, minutesToday, meetingsToday, inboundCallsToday] = await Promise.all([
       prisma.tenant.count({ where: { status: 'ACTIVE' } }),
       prisma.call.count({ where: { createdAt: { gte: startOfDay() } } }),
       prisma.call.aggregate({
@@ -36,7 +36,8 @@ router.get('/stats', async (req, res, next) => {
       }),
       prisma.call.count({
         where: { outcome: 'BOOKED', createdAt: { gte: startOfDay() } }
-      })
+      }),
+      prisma.inboundCall.count({ where: { createdAt: { gte: startOfDay() } } })
     ])
 
     const revenueToday = await prisma.usageLog.aggregate({
@@ -49,7 +50,8 @@ router.get('/stats', async (req, res, next) => {
       callsToday,
       minutesToday: minutesToday._sum.billedMinutes || 0,
       meetingsToday,
-      revenueToday: revenueToday._sum.amount || 0
+      revenueToday: revenueToday._sum.amount || 0,
+      inboundCallsToday
     })
   } catch (err) { next(err) }
 })
@@ -125,7 +127,7 @@ router.get('/tenants', async (req, res, next) => {
       include: {
         phoneNumbers: true,
         plan: { select: { id: true, name: true, price: true, minutesIncluded: true } },
-        _count: { select: { leads: true, calls: true, campaigns: true } }
+        _count: { select: { leads: true, calls: true, campaigns: true, inboundCalls: true, inboundAssistants: true } }
       },
       orderBy: { createdAt: 'desc' }
     })
@@ -143,7 +145,7 @@ router.get('/tenants/:id', async (req, res, next) => {
         users: { select: { id: true, name: true, email: true, role: true, lastLoginAt: true } },
         scripts: { orderBy: { createdAt: 'desc' } },
         campaigns: { include: { _count: { select: { leads: true, calls: true } } }, orderBy: { createdAt: 'desc' } },
-        _count: { select: { leads: true, calls: true } }
+        _count: { select: { leads: true, calls: true, inboundCalls: true, inboundAssistants: true } }
       }
     })
     if (!tenant) return res.status(404).json({ error: 'Tenant not found' })
