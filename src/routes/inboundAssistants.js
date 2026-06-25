@@ -153,7 +153,13 @@ router.post('/:id/activate', requireTenantUser, async (req, res, next) => {
     });
 
     res.json({ assistant: updated, vapiAssistantId, message: 'Inbound receptionist is now live' });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.response?.data) {
+      console.error('[inbound/activate] Vapi error:', err.response.status, JSON.stringify(err.response.data));
+      return res.status(400).json({ error: err.response.data?.message || err.message, details: err.response.data });
+    }
+    next(err);
+  }
 });
 
 // POST /api/inbound/assistants/:id/deactivate

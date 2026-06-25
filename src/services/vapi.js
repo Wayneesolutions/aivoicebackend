@@ -46,14 +46,14 @@ const DEEPGRAM_LANG = {
 // {{prospect_name}} is a template var Vapi fills at call time.
 // Hindi/Punjabi verb forms differ by gender: "bol raha hoon" (male) vs "bol rahi hoon" (female).
 const FIRST_MESSAGE_BY_LANG = {
-  en: 'Hi, may I speak with {{prospect_name}}? This is {{agent_name}} calling.',
+  en: 'Hi, this is {{agent_name}} calling.',
   hi: {
-    male:   'नमस्ते, क्या मेरी बात {{prospect_name}} जी से हो सकती है? मैं {{agent_name}} बोल रहा हूँ।',
-    female: 'नमस्ते, क्या मेरी बात {{prospect_name}} जी से हो सकती है? मैं {{agent_name}} बोल रही हूँ।'
+    male:   'नमस्ते! मैं {{agent_name}} बोल रहा हूँ।',
+    female: 'नमस्ते! मैं {{agent_name}} बोल रही हूँ।'
   },
   pa: {
-    male:   'ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕੀ ਮੇਰੀ ਗੱਲ {{prospect_name}} ਜੀ ਨਾਲ ਹੋ ਸਕਦੀ ਹੈ? ਮੈਂ {{agent_name}} ਬੋਲ ਰਿਹਾ ਹਾਂ।',
-    female: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕੀ ਮੇਰੀ ਗੱਲ {{prospect_name}} ਜੀ ਨਾਲ ਹੋ ਸਕਦੀ ਹੈ? ਮੈਂ {{agent_name}} ਬੋਲ ਰਹੀ ਹਾਂ।'
+    male:   'ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ {{agent_name}} ਬੋਲ ਰਿਹਾ ਹਾਂ।',
+    female: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ {{agent_name}} ਬੋਲ ਰਹੀ ਹਾਂ।'
   }
 }
 
@@ -125,25 +125,25 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
   const isEnglish = !language || language === 'en'
   const startSpeakingPlan = isEnglish
     ? {
-        waitSeconds: 0.4,
+        waitSeconds: 0.2,
         smartEndpointingPlan: {
           provider: 'livekit',
           waitFunction: '2000 / (1 + exp(-10 * (x - 0.5)))',
         },
       }
     : {
-        waitSeconds: 0.4,
+        waitSeconds: 0.2,
         transcriptionEndpointingPlan: {
           onPunctuationSeconds:   0.1,
-          onNoPunctuationSeconds: 0.8,
-          onNumberSeconds:        0.5,
+          onNoPunctuationSeconds: 0.4,
+          onNumberSeconds:        0.3,
         },
       }
 
   const stopSpeakingPlan = {
     numWords:       0,
     voiceSeconds:   0.2,
-    backoffSeconds: 1.0,
+    backoffSeconds: 0.4,
   }
 
   const resolvedVoiceId = (voiceId && voiceId !== VAPI_BUILTIN_VOICE)
@@ -162,8 +162,8 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       model: 'gpt-4o-mini',
       systemPrompt: genderInstruction + (systemPrompt || ''),
       tools: getVapiFunctions(),
-      temperature: 0.7,
-      maxTokens: 80,
+      temperature: 0.3,
+      maxTokens: 60,
     },
     voice: {
       provider: '11labs',

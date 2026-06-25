@@ -4,6 +4,14 @@ const prisma  = require('../lib/prisma');
 const { requireTenantUser } = require('../middleware/auth');
 const vapiService = require('../services/inboundVapi');
 
+// Uses the dedicated inbound Twilio account when set, falls back to the outbound one.
+function getTwilioInbound() {
+  return require('twilio')(
+    process.env.TWILIO_INBOUND_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_INBOUND_AUTH_TOKEN  || process.env.TWILIO_AUTH_TOKEN,
+  );
+}
+
 // GET /api/inbound/phone-numbers
 router.get('/', requireTenantUser, async (req, res, next) => {
   try {
@@ -20,7 +28,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
 router.post('/search', requireTenantUser, async (req, res, next) => {
   try {
     const { country = 'CA', areaCode, contains } = req.body;
-    const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    const twilio = getTwilioInbound();
     const params = { limit: 20, voiceEnabled: true };
     if (areaCode) params.areaCode = areaCode;
     if (contains) params.contains = contains;
@@ -40,7 +48,7 @@ router.post('/search', requireTenantUser, async (req, res, next) => {
 router.post('/buy', requireTenantUser, async (req, res, next) => {
   try {
     const { phoneNumber, country = 'CA' } = req.body;
-    const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    const twilio = getTwilioInbound();
 
     const purchased = await twilio.incomingPhoneNumbers.create({ phoneNumber });
     const vapiPhone = await vapiService.importPhoneNumber(phoneNumber, purchased.sid);
@@ -62,7 +70,14 @@ router.post('/buy', requireTenantUser, async (req, res, next) => {
 // POST /api/inbound/phone-numbers/import — import existing Twilio number
 router.post('/import', requireTenantUser, async (req, res, next) => {
   try {
-    const { phoneNumber, twilioSid, country = 'CA' } = req.body;
+    let { phoneNumber, twilioSid, country = 'CA' } = req.body;
+    if (!phoneNumber || !twilioSid)
+      return res.status(400).json({ error: 'phoneNumber and twilioSid are required' });
+
+    // Normalise to E.164 — strip spaces/dashes/parens, prepend + if missing
+    phoneNumber = phoneNumber.replace(/[\s\-().]/g, '');
+    if (!phoneNumber.startsWith('+')) phoneNumber = '+' + phoneNumber;
+
     const vapiPhone = await vapiService.importPhoneNumber(phoneNumber, twilioSid);
 
     const record = await prisma.inboundPhoneNumber.create({
@@ -76,7 +91,10 @@ router.post('/import', requireTenantUser, async (req, res, next) => {
       }
     });
     res.status(201).json(record);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.vapiError) return res.status(400).json({ error: err.message, details: err.vapiError });
+    next(err);
+  }
 });
 
 // DELETE /api/inbound/phone-numbers/:id
@@ -92,7 +110,7 @@ router.delete('/:id', requireTenantUser, async (req, res, next) => {
         .catch(e => console.error('[inbound/phones] Vapi delete failed:', e.message));
     }
     if (num.twilioSid) {
-      const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      const twilio = getTwilioInbound();
       await twilio.incomingPhoneNumbers(num.twilioSid).remove()
         .catch(e => console.error('[inbound/phones] Twilio release failed:', e.message));
     }

@@ -88,12 +88,13 @@ ${script.objections ? `\nOBJECTIONS: ${script.objections}` : ''}
 ${script.faqDocument ? `\nFAQ: ${script.faqDocument}` : ''}
 
 RULES (follow every one):
-- Every reply: 1–2 sentences MAX. Never monologue.
+- Opening: say ONE short sentence introducing yourself and why you're calling, then ask ONE question. Stop there. Never dump the full pitch upfront.
+- Every reply after opening: 1–2 sentences MAX. Never monologue.
+- ALWAYS start your reply with a natural spoken filler — "Sure.", "Right.", "Got it.", "Absolutely.", "Of course.", "Mm-hmm." — then continue. This is mandatory, never skip it.
 - Always respond to what they just said before moving forward.
 - After every point, ask ONE question. Never two.
-- Natural filler words: "Sure", "Got it", "That makes sense".
+- Never ask for email. Not before booking, not during, not ever.
 - If asked "Are you AI?" or "Are you a robot?": Redirect naturally — say "I'm [your name], I'm just calling to connect with you about [topic]" and continue without confirming or denying.
-- Before booking: always ask for email first if not given ("What email should I send the confirmation to?").
 - Book meeting: use book_meeting function immediately when they agree. Offer 2 time slots.
 - End call: use end_call when booked, clearly not interested, or voicemail.
 - Never mention competitors. Never invent prices or timelines.
@@ -120,7 +121,6 @@ function getVapiFunctions() {
           type: 'object',
           properties: {
             prospect_name:  { type: 'string', description: 'Full name of the prospect' },
-            prospect_email: { type: 'string', description: 'Email address (optional)' },
             preferred_slot: { type: 'string', description: 'ISO 8601 datetime, e.g. 2026-07-01T14:00:00Z' },
             notes:          { type: 'string', description: 'Relevant notes from the conversation' }
           },

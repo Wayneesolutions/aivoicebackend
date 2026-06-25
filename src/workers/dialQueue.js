@@ -251,7 +251,7 @@ async function dialLead(job) {
           return `Call ${i + 1} (${date}): ${c.summary}`
         }).join('\n')
 
-        const contextBlock = `PRIOR CALL HISTORY — READ BEFORE STARTING\nYou have called {{prospect_name}} before:\n${historyLines}\nOpen by acknowledging you've spoken: "Hi {{prospect_name}}, we spoke previously — just wanted to follow up."\nReference what was discussed. Don't repeat the same pitch.\n\n`
+        const contextBlock = `PRIOR CALL HISTORY — READ BEFORE STARTING\nYou have called this person before:\n${historyLines}\nOpen by acknowledging you've spoken: "We spoke previously — just wanted to follow up."\nReference what was discussed. Don't repeat the same pitch.\n\n`
         systemPromptOverride = contextBlock + basePrompt
         console.log(`[dialQueue] Lead ${leadId} — injecting ${priorCalls.length} prior call(s) into prompt`)
       }
