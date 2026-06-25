@@ -20,7 +20,25 @@ const LANGUAGE_NAMES = {
 
 // Compressed language instructions — same meaning, 60% fewer tokens
 const LANGUAGE_STYLE = {
-  hi: `LANGUAGE: Speak pure Hindi throughout. English only for proper nouns and numbers.`,
+  // Fix 4 from Voice Tuning Brief: "too-pure Hindi" was caused by telling the model to avoid English.
+  // Hindi callers in Punjab/North India speak Hinglish naturally — mixing Hindi and English.
+  // The PDF's forbidden-words list, number rules, and few-shot examples are all included here.
+  hi: `LANGUAGE & TONE: Speak natural everyday Hinglish the way people in Punjab / North India actually talk on the phone — casual and friendly, like a local receptionist. NOT formal, NOT literary, NOT a news anchor.
+- Mix common English words naturally: appointment, book, time, slot, confirm, number, address, cancel, sir/ma'am, sorry, thank you, ok.
+- FORBIDDEN formal/Sanskritized words: suniscit, bhent, doorbhash, krmank, upalabdh — always use the Hinglish word instead.
+- Write English loanwords in Devanagari so the voice reads them with a natural Indian accent: अपॉइंटमेंट, कन्फ़र्म, टाइम, स्लॉट, सॉरी, थेंक यू.
+
+NUMBERS (critical — TTS reads raw digits incorrectly):
+- Never write raw digits. Always spell out as spoken Hindi words.
+- Phone numbers: digit by digit — 98146 → "नौ, आठ, एक, चार, छह"
+- Times: spoken form — "साढ़े तीन बजे", "शाम के चार बजे" — never "3:30 PM"
+
+EXAMPLES — always match the right column:
+- Greeting: नमस्ते! मैं आपकी कैसे हेल्प कर सकती हूँ? [NOT: नमस्ते, मैं आपकी क्या सहायता कर सकती हूँ?]
+- Ask phone: ज़रा अपना फ़ोन नंबर बता दीजिए। [NOT: कृपया अपना दूरभाष क्रमांक प्रदान करें।]
+- Confirm booking: आपका अपॉइंटमेंट फ़िक्स हो गया है! [NOT: आपकी भेंट सुनिश्चित कर दी गई है।]
+- Slot not free: सॉरी, उस टाइम पे हम अवेलेबल नहीं हैं। कोई और टाइम चलेगा? [NOT: क्षमा करें, उस समय हम उपलब्ध नहीं हैं।]
+- Closing: ठीक है, थेंक यू! आपका दिन अच्छा रहे। [NOT: आपका दिन शुभ हो। धन्यवाद।]`,
 
   hinglish: `LANGUAGE: Speak natural Hinglish (Hindi structure, English business words freely mixed).
 Use English for: meeting, call, software, solution, budget, demo, team, project.
@@ -29,7 +47,12 @@ Example: "Toh basically humara solution aapki team ki efficiency improve karta h
 Match the prospect — more English if they speak English, more Hindi if they speak Hindi.`,
 
   pa: `LANGUAGE: Speak warm conversational Punjabi. Mix English for business/tech terms naturally.
-Example: "ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕੀ ਮੈਂ [prospect] ਜੀ ਨਾਲ ਗੱਲ ਕਰ ਸਕਦਾ ਹਾਂ? ਸਾਡਾ solution ਤੁਹਾਡੇ business ਲਈ ਵਧੀਆ ਹੈ।"`,
+Example: "ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕੀ ਮੈਂ [prospect] ਜੀ ਨਾਲ ਗੱਲ ਕਰ ਸਕਦਾ ਹਾਂ? ਸਾਡਾ solution ਤੁਹਾਡੇ business ਲਈ ਵਧੀਆ ਹੈ।"
+
+NUMBERS (critical — TTS reads raw digits incorrectly):
+- Never write raw digits. Spell out as spoken Punjabi words.
+- Phone numbers: digit by digit — 98146 → "nau, ath, ik, char, chhe"
+- Times: spoken form — "sadhe tin waje", "sham de char waje" — never "3:30 PM"`,
 
   es: `LANGUAGE: Speak natural Latin American Spanish. English tech terms are fine.`,
   fr: `LANGUAGE: Speak natural French. Keep English technical terms as-is.`,

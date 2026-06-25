@@ -119,6 +119,33 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
   const deepgramLang = DEEPGRAM_LANG[language || 'en'] || 'en-US'
   const transcriberExtra = {}
 
+  // LiveKit smart endpointing is English-only per Vapi docs.
+  // All other languages use transcription endpointing with a reduced no-punctuation wait
+  // (0.8s vs the 1.5s default) — this is the main latency fix for Hindi/Punjabi.
+  const isEnglish = !language || language === 'en'
+  const startSpeakingPlan = isEnglish
+    ? {
+        waitSeconds: 0.4,
+        smartEndpointingPlan: {
+          provider: 'livekit',
+          waitFunction: '2000 / (1 + exp(-10 * (x - 0.5)))',
+        },
+      }
+    : {
+        waitSeconds: 0.4,
+        transcriptionEndpointingPlan: {
+          onPunctuationSeconds:   0.1,
+          onNoPunctuationSeconds: 0.8,
+          onNumberSeconds:        0.5,
+        },
+      }
+
+  const stopSpeakingPlan = {
+    numWords:       0,
+    voiceSeconds:   0.2,
+    backoffSeconds: 1.0,
+  }
+
   const resolvedVoiceId = (voiceId && voiceId !== VAPI_BUILTIN_VOICE)
     ? voiceId
     : process.env.ELEVENLABS_DEFAULT_VOICE_ID
@@ -160,6 +187,8 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     },
     // FIX BUG-D: was hardcoded English. Now matches the script's language and agent gender.
     firstMessage: buildFirstMessage(language, agentName, agentGender),
+    startSpeakingPlan,
+    stopSpeakingPlan,
     recordingEnabled: true,
     silenceTimeoutSeconds: 30,
     maxDurationSeconds: 600,

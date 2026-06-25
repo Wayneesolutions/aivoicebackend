@@ -67,6 +67,53 @@ router.post('/', requireTenantOwner, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// PATCH /api/scripts/:id — client edits their own script (resets to PENDING_REVIEW)
+router.patch('/:id', requireTenantOwner, async (req, res, next) => {
+  try {
+    const script = await prisma.script.findFirst({ where: { id: req.params.id, tenantId: req.tenant.id } })
+    if (!script) return res.status(404).json({ error: 'Script not found' })
+    if (script.status === 'LIVE') return res.status(400).json({ error: 'Cannot edit a LIVE script. Pause the campaign first.' })
+
+    const { name, agentName, agentGender, companyInfo, servicesInfo, goalText, objections, voiceId, language } = req.body
+    const updated = await prisma.script.update({
+      where: { id: req.params.id },
+      data: {
+        ...(name          !== undefined && { name }),
+        ...(agentName     !== undefined && { agentName }),
+        ...(agentGender   !== undefined && { agentGender: agentGender === 'male' ? 'male' : 'female' }),
+        ...(companyInfo   !== undefined && { companyInfo }),
+        ...(servicesInfo  !== undefined && { servicesInfo }),
+        ...(goalText      !== undefined && { goalText }),
+        ...(objections    !== undefined && { objections: objections || null }),
+        ...(voiceId       !== undefined && { voiceId: voiceId || null }),
+        ...(language      !== undefined && { language }),
+        status: 'PENDING_REVIEW',
+        reviewNote: null,
+        reviewedAt: null,
+        reviewedBy: null,
+        compiledPrompt: null,
+      }
+    })
+    res.json(updated)
+  } catch (err) { next(err) }
+})
+
+// DELETE /api/scripts/:id — client deletes a script (blocked if LIVE or has campaigns)
+router.delete('/:id', requireTenantOwner, async (req, res, next) => {
+  try {
+    const script = await prisma.script.findFirst({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      include: { campaigns: { select: { id: true } } }
+    })
+    if (!script) return res.status(404).json({ error: 'Script not found' })
+    if (script.status === 'LIVE') return res.status(400).json({ error: 'Cannot delete a LIVE script. Pause the campaign first.' })
+    if (script.campaigns.length > 0) return res.status(400).json({ error: 'Cannot delete a script that has campaigns linked to it. Delete the campaigns first.' })
+
+    await prisma.script.delete({ where: { id: req.params.id } })
+    res.json({ message: 'Script deleted' })
+  } catch (err) { next(err) }
+})
+
 // POST /api/scripts/:id/faq — upload FAQ document
 router.post('/:id/faq', requireTenantOwner, upload.single('file'), async (req, res, next) => {
   try {
