@@ -56,9 +56,19 @@ async function cleanupStaleCalls() {
       where: { id: call.id },
       data: { status: 'COMPLETED', outcome: 'NO_ANSWER', durationSeconds: 0, endedAt: new Date() }
     }).catch(() => {})
+
+    // Respect exhaustion: if attempts already at max, mark EXHAUSTED not NO_ANSWER
+    const lead = await prisma.lead.findUnique({
+      where: { id: call.leadId },
+      select: { callAttempts: true, campaign: { select: { maxAttempts: true } } }
+    }).catch(() => null)
+    const terminalStatus = (lead && lead.callAttempts >= (lead.campaign?.maxAttempts ?? Infinity))
+      ? 'EXHAUSTED'
+      : 'NO_ANSWER'
+
     await prisma.lead.update({
       where: { id: call.leadId },
-      data: { status: 'NO_ANSWER' }
+      data: { status: terminalStatus }
     }).catch(() => {})
   }
 }
@@ -171,10 +181,14 @@ async function runScheduler(campaignId = null) {
         continue
       }
 
-      await prisma.lead.update({
-        where: { id: lead.id },
+      // Atomic optimistic lock: only set CALLING if not already CALLING.
+      // Prevents the same lead being double-queued when two runScheduler calls
+      // run concurrently (e.g. recurring scan + manual triggerCampaign overlap).
+      const grabbed = await prisma.lead.updateMany({
+        where: { id: lead.id, status: { not: 'CALLING' } },
         data: { status: 'CALLING' }
       })
+      if (grabbed.count === 0) continue
 
       await callQueue.add('dial', {
         leadId:          lead.id,
@@ -189,11 +203,26 @@ async function runScheduler(campaignId = null) {
         leadCompany:     lead.company || '',
         leadTitle:       lead.title   || ''
       }, {
-        attempts: 2,
-        backoff: { type: 'fixed', delay: 10000 },
-        timeout: 45000   // 45s hard timeout per job — prevents zombie calls
+        attempts: 1,      // No BullMQ auto-retry: if the job throws after vapiService.startOutboundCall
+        timeout: 45000    // succeeds, a retry would make a second real phone call. Scheduler handles retries.
       })
     }
+  }
+}
+
+async function drainCampaignJobs(campaignId) {
+  try {
+    const [waiting, delayed] = await Promise.all([
+      callQueue.getWaiting(),
+      callQueue.getDelayed()
+    ])
+    const jobs = [...waiting, ...delayed].filter(j => j.data?.campaignId === campaignId)
+    await Promise.all(jobs.map(j => j.remove()))
+    if (jobs.length > 0) {
+      console.log(`[dialQueue] Drained ${jobs.length} queued job(s) for campaign ${campaignId}`)
+    }
+  } catch (err) {
+    console.error(`[dialQueue] Failed to drain jobs for campaign ${campaignId}:`, err.message)
   }
 }
 
@@ -208,6 +237,23 @@ async function dialLead(job) {
   if (!parsed || !parsed.isValid()) {
     console.warn(`[dialQueue] Invalid phone number for lead ${leadId}: ${toNumber}`)
     await prisma.lead.update({ where: { id: leadId }, data: { status: 'WRONG_NUMBER' } })
+    return
+  }
+
+  // Guard: re-fetch live state before every call — catches pause/company-pause
+  // that happened after this job was already queued.
+  const liveState = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    select: { status: true, tenant: { select: { status: true } } }
+  })
+  if (liveState?.status !== 'ACTIVE') {
+    console.log(`[dialQueue] Campaign ${campaignId} is ${liveState?.status} — skipping lead ${leadId}, resetting to PENDING`)
+    await prisma.lead.update({ where: { id: leadId }, data: { status: 'PENDING' } }).catch(() => {})
+    return
+  }
+  if (liveState?.tenant?.status !== 'ACTIVE') {
+    console.log(`[dialQueue] Tenant is ${liveState.tenant.status} (company paused from admin) — skipping lead ${leadId}, resetting to PENDING`)
+    await prisma.lead.update({ where: { id: leadId }, data: { status: 'PENDING' } }).catch(() => {})
     return
   }
 
@@ -235,15 +281,29 @@ async function dialLead(job) {
   try {
     const campaign = await prisma.campaign.findUnique({
       where: { id: campaignId },
-      select: { script: { select: { compiledPrompt: true, language: true, agentGender: true } } }
+      select: {
+        timezone: true,
+        script: { select: { compiledPrompt: true, language: true, agentGender: true } }
+      }
     })
     scriptLanguage = campaign?.script?.language || 'en'
     scriptGender   = campaign?.script?.agentGender || 'female'
 
-    if (priorCalls.length > 0) {
-      const meta = JSON.parse(campaign?.script?.compiledPrompt || '{}')
-      const basePrompt = meta.prompt || ''
-      if (basePrompt) {
+    const meta = JSON.parse(campaign?.script?.compiledPrompt || '{}')
+    const basePrompt = meta.prompt || ''
+
+    if (basePrompt) {
+      // Inject today's date in the campaign's timezone so the AI generates correct
+      // future dates. Without this, GPT uses its 2024 training-cutoff as "today"
+      // and books meetings in the past.
+      const campaignTz = campaign?.timezone || 'UTC'
+      const todayStr = new Date().toLocaleDateString('en-US', {
+        timeZone: campaignTz,
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+      })
+      const dateBlock = `TODAY: ${todayStr} (${campaignTz}). All meetings and callbacks MUST be scheduled for future dates only.\n\n`
+
+      if (priorCalls.length > 0) {
         const historyLines = priorCalls.map((c, i) => {
           const date = c.endedAt
             ? c.endedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -252,8 +312,11 @@ async function dialLead(job) {
         }).join('\n')
 
         const contextBlock = `PRIOR CALL HISTORY — READ BEFORE STARTING\nYou have called this person before:\n${historyLines}\nOpen by acknowledging you've spoken: "We spoke previously — just wanted to follow up."\nReference what was discussed. Don't repeat the same pitch.\n\n`
-        systemPromptOverride = contextBlock + basePrompt
-        console.log(`[dialQueue] Lead ${leadId} — injecting ${priorCalls.length} prior call(s) into prompt`)
+        systemPromptOverride = dateBlock + contextBlock + basePrompt
+        console.log(`[dialQueue] Lead ${leadId} — injecting date (${todayStr}) + ${priorCalls.length} prior call(s) into prompt`)
+      } else {
+        systemPromptOverride = dateBlock + basePrompt
+        console.log(`[dialQueue] Lead ${leadId} — injecting date (${todayStr}) into prompt`)
       }
     }
   } catch (err) {
@@ -327,9 +390,12 @@ async function startWorker() {
   callWorker.on('failed', async (job, err) => {
     console.error(`[dialQueue] Job ${job?.id} failed (lead: ${job?.data?.leadId}):`, err.message)
     if (job?.data?.leadId) {
+      // Set NO_ANSWER (not PENDING) so the retryAfterHours gate applies before the
+      // scheduler picks this lead up again. Setting PENDING would cause an immediate
+      // re-queue on the next 5-min scan, bypassing the wait window entirely.
       await prisma.lead.update({
         where: { id: job.data.leadId },
-        data: { status: 'PENDING' }
+        data: { status: 'NO_ANSWER' }
       }).catch(() => {})
     }
   })
@@ -348,4 +414,4 @@ async function stopWorker() {
   await callWorker?.close()
 }
 
-module.exports = { startWorker, triggerCampaign, stopWorker }
+module.exports = { startWorker, triggerCampaign, stopWorker, drainCampaignJobs }

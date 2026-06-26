@@ -429,7 +429,8 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
       voiceId: script.voiceId,
       agentName: script.agentName,
       language: script.language || 'en',
-      agentGender: script.agentGender || 'female'
+      agentGender: script.agentGender || 'female',
+      maxCallDuration: script.maxCallDuration || 180
     })
 
     const updated = await prisma.script.update({
@@ -474,7 +475,8 @@ router.post('/scripts/:id/resync', async (req, res, next) => {
       agentName: script.agentName,
       language: script.language || 'en',
       agentGender: script.agentGender || 'female',
-      existingAssistantId
+      existingAssistantId,
+      maxCallDuration: script.maxCallDuration || 180
     })
 
     const updated = await prisma.script.update({

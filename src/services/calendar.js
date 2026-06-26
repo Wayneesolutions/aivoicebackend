@@ -20,20 +20,37 @@ function normaliseSlot(slot) {
     return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
   }
 
-  // Already valid ISO 8601 — pass through unchanged
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(slot)) return slot
+  let parsed
 
-  // Try native Date parse (handles many common formats)
-  const parsed = new Date(slot)
-  if (!isNaN(parsed.getTime())) {
+  // Already valid ISO 8601
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(slot)) {
+    parsed = new Date(slot)
+  } else {
+    // Try native Date parse (handles natural language like "Monday at 2pm")
+    parsed = new Date(slot)
+    if (isNaN(parsed.getTime())) {
+      const fallback = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      console.warn(`[calendar] Could not parse preferred_slot: "${slot}" — using fallback ${fallback}`)
+      return fallback
+    }
     console.log(`[calendar] Converted slot "${slot}" → ${parsed.toISOString()}`)
-    return parsed.toISOString()
   }
 
-  // Could not parse — fallback to 24h from now so call doesn't crash
-  const fallback = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-  console.warn(`[calendar] Could not parse preferred_slot: "${slot}" — using fallback ${fallback}`)
-  return fallback
+  // Safety net: if the resolved date is in the past, advance year-by-year until future.
+  // Guards against GPT training-cutoff errors where the AI generates 2024 dates
+  // instead of the correct current year (e.g. "June 27" → 2024-06-27 instead of 2026-06-27).
+  const now = new Date()
+  if (parsed < now) {
+    const original = parsed.toISOString()
+    let attempts = 0
+    while (parsed < now && attempts < 5) {
+      parsed.setFullYear(parsed.getFullYear() + 1)
+      attempts++
+    }
+    console.warn(`[calendar] Past date corrected: "${original}" → "${parsed.toISOString()}" (+${attempts} year(s))`)
+  }
+
+  return parsed.toISOString()
 }
 
 // ── Book meeting (public API) ──────────────────────────────────────────────────

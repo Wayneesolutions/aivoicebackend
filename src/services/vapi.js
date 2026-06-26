@@ -114,7 +114,7 @@ function warnIfVoiceLanguageMismatch({ voiceId, language }) {
 /**
  * Create or update a Vapi assistant for a given script.
  */
-async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, agentGender, existingAssistantId }) {
+async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, agentGender, existingAssistantId, maxCallDuration }) {
 
   const deepgramLang = DEEPGRAM_LANG[language || 'en'] || 'en-US'
   const transcriberExtra = {}
@@ -162,7 +162,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       model: 'gpt-4o-mini',
       systemPrompt: genderInstruction + (systemPrompt || ''),
       tools: getVapiFunctions(),
-      temperature: 0.3,
+      temperature: 0.6,
       maxTokens: 60,
     },
     voice: {
@@ -190,8 +190,8 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     startSpeakingPlan,
     stopSpeakingPlan,
     recordingEnabled: true,
-    silenceTimeoutSeconds: 30,
-    maxDurationSeconds: 600,
+    silenceTimeoutSeconds: 20,
+    maxDurationSeconds: maxCallDuration || 180,
     backgroundSound: 'office',
     serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET

@@ -6,6 +6,7 @@ const XLSX = require('xlsx')
 const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
+const { triggerCampaign } = require('../workers/dialQueue')
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } })
 
@@ -64,50 +65,120 @@ router.post('/upload', requireTenantOwner, upload.single('file'), async (req, re
     const rows = parseFileToRows(req.file.buffer, req.file.originalname)
 
     const results = { imported: 0, skipped: 0, errors: [] }
-    const toCreate = []
+    const parsed = []
 
+    // Pass 1: parse and validate all rows without hitting the DB
     for (const [i, row] of rows.entries()) {
       const rawPhone = row.phone || row.Phone || row.PHONE || row['Phone Number']
       const name     = row.name  || row.Name  || row.NAME  || `Lead ${i + 1}`
-      
+
       if (!rawPhone) {
         results.errors.push(`Row ${i + 2}: missing phone`)
         results.skipped++
         continue
       }
 
-      // Normalize to E.164
-      const parsed = parsePhoneNumberFromString(rawPhone, row.country || 'US')
-      if (!parsed || !parsed.isValid()) {
+      const phoneObj = parsePhoneNumberFromString(rawPhone, row.country || 'US')
+      if (!phoneObj || !phoneObj.isValid()) {
         results.errors.push(`Row ${i + 2}: invalid phone "${rawPhone}"`)
         results.skipped++
         continue
       }
 
-      const phone = parsed.format('E.164')
+      parsed.push({
+        phone:   phoneObj.format('E.164'),
+        name:    name.trim(),
+        email:   row.email   || row.Email   || null,
+        company: row.company || row.Company || null,
+        title:   row.title   || row.Title   || null,
+        country: (row.country || row.Country || 'US').toUpperCase()
+      })
+    }
 
-      // Check if already exists for this tenant
-      const exists = await prisma.lead.findFirst({ where: { tenantId: req.tenant.id, phone } })
-      if (exists) { results.skipped++; continue }
+    // Pass 2: single batch query for all phones — eliminates N+1
+    const phones = parsed.map(p => p.phone)
+    const existingPhones = phones.length > 0
+      ? new Set(
+          (await prisma.lead.findMany({
+            where: { tenantId: req.tenant.id, phone: { in: phones } },
+            select: { phone: true }
+          })).map(l => l.phone)
+        )
+      : new Set()
 
+    // Deduplicate within the file itself
+    const seenInBatch = new Set()
+    const toCreate = []
+    for (const p of parsed) {
+      if (existingPhones.has(p.phone) || seenInBatch.has(p.phone)) {
+        results.skipped++
+        continue
+      }
+      seenInBatch.add(p.phone)
       toCreate.push({
         tenantId:   req.tenant.id,
         campaignId: campaignId || null,
-        name:       name.trim(),
-        phone,
-        email:      row.email   || row.Email   || null,
-        company:    row.company || row.Company || null,
-        title:      row.title   || row.Title   || null,
-        country:    (row.country || row.Country || 'US').toUpperCase()
+        ...p
       })
       results.imported++
     }
 
     if (toCreate.length > 0) {
+      const batch = await prisma.leadBatch.create({
+        data: {
+          tenantId:   req.tenant.id,
+          filename:   req.file.originalname,
+          totalCount: toCreate.length
+        }
+      })
+      toCreate.forEach(lead => { lead.uploadBatchId = batch.id })
       await prisma.lead.createMany({ data: toCreate })
+      results.batchId = batch.id
     }
 
     res.json(results)
+  } catch (err) { next(err) }
+})
+
+// GET /api/leads/batches — list upload batches for the tenant with available/used counts
+router.get('/batches', requireTenantUser, async (req, res, next) => {
+  try {
+    const batches = await prisma.leadBatch.findMany({
+      where: { tenantId: req.tenant.id },
+      orderBy: { createdAt: 'desc' }
+    })
+
+    const batchIds = batches.map(b => b.id)
+
+    // Count available leads per batch (PENDING, unassigned, not opted out)
+    const availableCounts = await prisma.lead.groupBy({
+      by: ['uploadBatchId'],
+      where: {
+        tenantId:     req.tenant.id,
+        uploadBatchId: { in: batchIds },
+        campaignId:   null,
+        status:       'PENDING',
+        isOptedOut:   false
+      },
+      _count: { id: true }
+    })
+
+    const availableMap = {}
+    availableCounts.forEach(row => { availableMap[row.uploadBatchId] = row._count.id })
+
+    const result = batches.map(b => {
+      const available = availableMap[b.id] ?? 0
+      return {
+        id:         b.id,
+        filename:   b.filename,
+        totalCount: b.totalCount,
+        available,
+        used:       b.totalCount - available,
+        createdAt:  b.createdAt
+      }
+    })
+
+    res.json(result)
   } catch (err) { next(err) }
 })
 
@@ -136,6 +207,36 @@ router.patch('/:id/reset', requireTenantOwner, async (req, res, next) => {
       }
     })
     res.json(lead)
+  } catch (err) { next(err) }
+})
+
+// POST /api/leads/:id/redial — immediately re-queue a no-answer/voicemail lead
+// Resets the lead to PENDING and triggers the campaign scheduler if the campaign is ACTIVE
+router.post('/:id/redial', requireTenantOwner, async (req, res, next) => {
+  try {
+    const existing = await prisma.lead.findFirst({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      include: { campaign: { select: { id: true, status: true } } }
+    })
+    if (!existing) return res.status(404).json({ error: 'Lead not found' })
+
+    const lead = await prisma.lead.update({
+      where: { id: req.params.id },
+      data: {
+        status:       'PENDING',
+        callAttempts: 0,
+        lastCalledAt: null,
+      }
+    })
+
+    let queued = false
+    const campaignStatus = existing.campaign?.status
+    if (existing.campaignId && campaignStatus === 'ACTIVE') {
+      await triggerCampaign(existing.campaignId)
+      queued = true
+    }
+
+    res.json({ lead, queued, campaignStatus: campaignStatus || null })
   } catch (err) { next(err) }
 })
 
