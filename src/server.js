@@ -37,8 +37,9 @@ app.use(cors({
 }))
 
 // Raw body must be registered BEFORE express.json() for routes that need it
-app.use('/api/webhooks',       express.raw({ type: '*/*' }))
-app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }))
+app.use('/api/webhooks',                express.raw({ type: '*/*' }))
+app.use('/api/whatsapp/webhooks/meta',  express.raw({ type: '*/*' }))
+app.use('/api/stripe/webhook',          express.raw({ type: 'application/json' }))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
@@ -60,6 +61,9 @@ app.use('/api/billing',   require('./routes/billing'))
 app.use('/api/stripe',    require('./routes/stripe'))
 app.use('/api/public',    require('./routes/public'))
 app.use('/api/sentiment', require('./routes/sentiment'))   // NEW — live sentiment dashboard
+
+// WhatsApp Outreach
+app.use('/api/whatsapp', require('./routes/whatsapp'))
 
 // Inbound receptionist
 app.use('/api/inbound/phone-numbers', require('./routes/inboundPhoneNumbers'))

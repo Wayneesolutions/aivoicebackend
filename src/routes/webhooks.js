@@ -291,6 +291,84 @@ async function handleCallEnded(event) {
       console.error('[webhook] CRM sync failed:', err.message)
     )
   }
+
+  // WhatsApp bridge: if the lead clearly agreed (BOOKED), automatically add them
+  // to the WhatsApp opted-in list so they appear in the WhatsApp outreach section.
+  // Runs fire-and-forget — never blocks or risks the main call-end flow.
+  if (outcome === 'BOOKED') {
+    bridgeLeadToWhatsApp(callRecord, recordingUrl).catch(err =>
+      console.error('[webhook] WA bridge failed:', err.message)
+    )
+  }
+}
+
+// Per-tenant system list name — all leads who opt in via VoCallM calls land here.
+const WA_AUTO_LIST_NAME = 'VoCallM Opted-In'
+
+async function bridgeLeadToWhatsApp(callRecord, recordingUrl) {
+  const lead     = callRecord.lead
+  const tenantId = callRecord.tenantId
+
+  if (!lead?.phone) return
+
+  // Find or create the auto-managed list for this tenant (one list per tenant, created lazily)
+  let list = await prisma.waContactList.findFirst({
+    where: { tenantId, name: WA_AUTO_LIST_NAME },
+  })
+  if (!list) {
+    list = await prisma.waContactList.create({
+      data: { tenantId, name: WA_AUTO_LIST_NAME, totalContacts: 0 },
+    })
+  }
+
+  // Check if this phone is already in the list
+  const existing = await prisma.waContact.findFirst({
+    where: { contactListId: list.id, phone: lead.phone },
+  })
+
+  if (existing) {
+    // Only upgrade status — never downgrade an already OPTED_IN contact
+    if (existing.optInStatus !== 'OPTED_IN') {
+      await prisma.waContact.update({
+        where: { id: existing.id },
+        data: {
+          fullName:          lead.name         || existing.fullName,
+          businessName:      lead.company      || existing.businessName,
+          optInStatus:       'OPTED_IN',
+          optInSource:       'vocallm_call',
+          optInTimestamp:    new Date(),
+          optInCallId:       callRecord.vapiCallId || callRecord.id,
+          optInRecordingUrl: recordingUrl || null,
+        },
+      })
+      console.log(`[webhook] WA bridge: upgraded ${lead.phone} → OPTED_IN`)
+    }
+    return
+  }
+
+  // New contact — insert and increment list counter atomically
+  await prisma.$transaction([
+    prisma.waContact.create({
+      data: {
+        contactListId:     list.id,
+        tenantId,
+        phone:             lead.phone,
+        fullName:          lead.name    || null,
+        businessName:      lead.company || null,
+        optInStatus:       'OPTED_IN',
+        optInSource:       'vocallm_call',
+        optInTimestamp:    new Date(),
+        optInCallId:       callRecord.vapiCallId || callRecord.id,
+        optInRecordingUrl: recordingUrl || null,
+      },
+    }),
+    prisma.waContactList.update({
+      where: { id: list.id },
+      data:  { totalContacts: { increment: 1 } },
+    }),
+  ])
+
+  console.log(`[webhook] WA bridge: added ${lead.phone} (${lead.name}) → OPTED_IN in list "${WA_AUTO_LIST_NAME}"`)
 }
 
 async function processMeetingBooking(callRecord, analysis) {

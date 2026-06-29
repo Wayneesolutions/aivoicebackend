@@ -29,10 +29,20 @@ function redisConnection() {
       host:     url.hostname,
       port:     parseInt(url.port) || 6379,
       password: url.password || undefined,
-      tls:      url.protocol === 'rediss:' ? {} : undefined
+      tls:      url.protocol === 'rediss:' ? {} : undefined,
+      // Required for BullMQ: prevents MaxRetriesPerRequestError crashes.
+      maxRetriesPerRequest: null,
+      enableReadyCheck:     false,
+      // Exponential backoff: 200ms → 400ms → 800ms … capped at 30s.
+      // Prevents log-spam when Redis isn't up yet (e.g. Docker Desktop still starting).
+      retryStrategy: (times) => Math.min(200 * Math.pow(2, times - 1), 30_000),
     }
   } catch {
-    return { host: 'localhost', port: 6379 }
+    return {
+      host: 'localhost', port: 6379,
+      maxRetriesPerRequest: null, enableReadyCheck: false,
+      retryStrategy: (times) => Math.min(200 * Math.pow(2, times - 1), 30_000),
+    }
   }
 }
 
@@ -40,6 +50,16 @@ const connection = redisConnection()
 
 const schedulerQueue = new Queue('dial-scheduler', { connection })
 const callQueue      = new Queue('dial-calls',     { connection })
+
+// Prevent unhandled 'error' events from crashing the Node.js process.
+// Log only the first error per queue — retryStrategy handles reconnection silently.
+let _schedulerErrLogged = false, _callsErrLogged = false
+schedulerQueue.on('error', (err) => {
+  if (!_schedulerErrLogged) { console.error('[dialQueue/scheduler] Redis unavailable:', err.message); _schedulerErrLogged = true }
+})
+callQueue.on('error', (err) => {
+  if (!_callsErrLogged) { console.error('[dialQueue/calls] Redis unavailable:', err.message); _callsErrLogged = true }
+})
 
 async function cleanupStaleCalls() {
   const cutoff = new Date(Date.now() - 15 * 60 * 1000) // 15 min — any AI call stuck longer than this means Vapi never sent end-of-call-report
@@ -399,6 +419,10 @@ async function startWorker() {
       }).catch(() => {})
     }
   })
+
+  let _swErrLogged = false, _cwErrLogged = false
+  schedulerWorker.on('error', (err) => { if (!_swErrLogged) { console.error('[dialQueue/schedulerWorker] Redis unavailable:', err.message); _swErrLogged = true } })
+  callWorker.on('error',      (err) => { if (!_cwErrLogged) { console.error('[dialQueue/callWorker] Redis unavailable:',      err.message); _cwErrLogged = true } })
 
   console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, rate: ${CALLS_PER_MINUTE}/min, scheduler: every 5min`)
 }

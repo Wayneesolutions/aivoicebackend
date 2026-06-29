@@ -66,6 +66,8 @@ model Tenant {
   inboundAssistants    InboundAssistant[]
   inboundCalls         InboundCall[]
   leadBatches          LeadBatch[]
+  waContactLists       WaContactList[]
+  waCampaigns          WaCampaign[]
 }
 
 enum TenantStatus {
@@ -477,13 +479,144 @@ model UsageLog {
   id            String    @id @default(cuid())
   tenantId      String
   callId        String
-  
+
   minutes       Float
   ratePerMinute Float
   amount        Float
-  
+
   createdAt     DateTime  @default(now())
 
   @@index([tenantId])
   @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────
+// WHATSAPP OUTREACH
+// Compliance-gated: a contact may ONLY be messaged on WhatsApp after
+// VoCallM confirms a verbal opt-in (optInStatus = OPTED_IN).
+// The ONLY code path that may set OPTED_IN is src/services/waOptIn.js.
+// The ONLY module that calls Meta's send endpoint is src/services/waWhatsapp.js,
+// and its query is hard-filtered to { optInStatus: "OPTED_IN", optedOut: false }.
+// ─────────────────────────────────────────────
+
+model WaContactList {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id])
+  name           String
+  sourceFilename String?
+  uploadedAt     DateTime  @default(now())
+  totalContacts  Int       @default(0)
+
+  contacts       WaContact[]
+
+  @@index([tenantId])
+}
+
+model WaContact {
+  id            String          @id @default(cuid())
+  contactListId String
+  contactList   WaContactList   @relation(fields: [contactListId], references: [id], onDelete: Cascade)
+  tenantId      String
+
+  fullName     String?
+  phone        String
+  businessName String?
+  tags         String?
+
+  optInStatus       WaOptInStatus @default(NOT_CONTACTED)
+  optedOut          Boolean       @default(false)
+  optInSource       String?
+  optInTimestamp    DateTime?
+  optInCallId       String?
+  optInRecordingUrl String?
+
+  serviceWindowExpiresAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  callAttempts WaCallAttempt[]
+  messages     WaMessage[]
+
+  @@unique([contactListId, phone])
+  @@index([tenantId])
+  @@index([optInStatus])
+  @@index([phone])
+}
+
+model WaCallAttempt {
+  id            String    @id @default(cuid())
+  contactId     String
+  contact       WaContact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  vocallmCallId String?
+  outcome       String?
+  transcript    String?   @db.Text
+  recordingUrl  String?
+  placedAt      DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@index([contactId])
+  @@index([vocallmCallId])
+}
+
+model WaCampaign {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+  name         String
+  templateName String
+  languageCode String   @default("en")
+  createdAt    DateTime @default(now())
+
+  messages     WaMessage[]
+
+  @@index([tenantId])
+}
+
+model WaMessage {
+  id          String             @id @default(cuid())
+  contactId   String
+  contact     WaContact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  campaignId  String?
+  campaign    WaCampaign?        @relation(fields: [campaignId], references: [id])
+  tenantId    String
+
+  direction   WaMessageDirection
+  status      WaMessageStatus    @default(QUEUED)
+  waMessageId String?
+  templateName String?
+  body        String?            @db.Text
+  error       String?            @db.Text
+  createdAt   DateTime           @default(now())
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@index([waMessageId])
+}
+
+enum WaOptInStatus {
+  NOT_CONTACTED
+  PENDING
+  OPTED_IN
+  DECLINED
+  NO_ANSWER
+  VOICEMAIL
+  NEEDS_MANUAL_REVIEW
+  FAILED
+}
+
+enum WaMessageDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum WaMessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  RECEIVED
 }

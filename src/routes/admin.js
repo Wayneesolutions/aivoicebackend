@@ -819,6 +819,110 @@ function startOfMonth() {
   return d
 }
 
+// GET /api/admin/debug/lead-status-counts — see how many leads exist per status (all tenants)
+router.get('/debug/lead-status-counts', async (req, res, next) => {
+  try {
+    const rows = await prisma.lead.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+      orderBy: { _count: { status: 'desc' } }
+    })
+    const total = await prisma.lead.count()
+    res.json({
+      total,
+      byStatus: Object.fromEntries(rows.map(r => [r.status, r._count._all]))
+    })
+  } catch (err) { next(err) }
+})
+
+// POST /api/admin/backfill-wa-opted-in
+// One-time (idempotent) backfill: scan every Lead with status=BOOKED and create
+// a WaContact (OPTED_IN) in that tenant's auto "VoCallM Opted-In" list.
+// Safe to run multiple times — skips contacts that already exist.
+router.post('/backfill-wa-opted-in', async (req, res, next) => {
+  try {
+    const WA_AUTO_LIST_NAME = 'VoCallM Opted-In'
+
+    const bookedLeads = await prisma.lead.findMany({
+      where: { status: 'BOOKED' },
+      include: {
+        calls: {
+          where: { outcome: 'BOOKED' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    })
+
+    let added = 0, skipped = 0
+    const errors = []
+    // Cache per-tenant list id so we don't hit DB on every row
+    const listCache = {}
+
+    for (const lead of bookedLeads) {
+      if (!lead.phone) { skipped++; continue }
+
+      try {
+        if (!listCache[lead.tenantId]) {
+          let list = await prisma.waContactList.findFirst({
+            where: { tenantId: lead.tenantId, name: WA_AUTO_LIST_NAME },
+          })
+          if (!list) {
+            list = await prisma.waContactList.create({
+              data: { tenantId: lead.tenantId, name: WA_AUTO_LIST_NAME, totalContacts: 0 },
+            })
+          }
+          listCache[lead.tenantId] = list
+        }
+
+        const list = listCache[lead.tenantId]
+
+        const existing = await prisma.waContact.findFirst({
+          where: { contactListId: list.id, phone: lead.phone },
+        })
+
+        if (existing) { skipped++; continue }
+
+        const bookedCall = lead.calls[0]
+
+        await prisma.$transaction([
+          prisma.waContact.create({
+            data: {
+              contactListId:     list.id,
+              tenantId:          lead.tenantId,
+              phone:             lead.phone,
+              fullName:          lead.name    || null,
+              businessName:      lead.company || null,
+              optInStatus:       'OPTED_IN',
+              optInSource:       'vocallm_call_backfill',
+              optInTimestamp:    lead.meetingBookedAt || lead.updatedAt,
+              optInCallId:       bookedCall?.vapiCallId || bookedCall?.id || null,
+              optInRecordingUrl: bookedCall?.recordingUrl || null,
+            },
+          }),
+          prisma.waContactList.update({
+            where: { id: list.id },
+            data:  { totalContacts: { increment: 1 } },
+          }),
+        ])
+
+        added++
+      } catch (err) {
+        errors.push(`Lead ${lead.id} (${lead.phone}): ${err.message}`)
+      }
+    }
+
+    // Recalculate totalContacts to fix any drift from the cache
+    for (const list of Object.values(listCache)) {
+      const count = await prisma.waContact.count({ where: { contactListId: list.id } })
+      await prisma.waContactList.update({ where: { id: list.id }, data: { totalContacts: count } })
+    }
+
+    console.log(`[admin] WA backfill complete — added=${added} skipped=${skipped} errors=${errors.length}`)
+    res.json({ totalBooked: bookedLeads.length, added, skipped, errors })
+  } catch (err) { next(err) }
+})
+
 // POST /api/admin/calls/cleanup-stale — immediately mark stuck calls as completed + reset bogus durations
 router.post('/calls/cleanup-stale', async (req, res, next) => {
   try {

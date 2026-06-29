@@ -5,6 +5,10 @@
   "scripts": {
     "dev": "node start-dev.js",
     "start": "node src/server.js",
+    "seed:demo": "node scripts/seed-demo-data.js",
+    "redis:start": "docker start vocallm-redis || docker run -d --name vocallm-redis -p 6379:6379 --restart unless-stopped redis:7-alpine redis-server --loglevel warning",
+    "redis:stop": "docker stop vocallm-redis",
+    "redis:logs": "docker logs vocallm-redis --tail 50",
     "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
     "prisma:migrate": "prisma migrate dev --schema=prisma/schema.prisma"
   },
