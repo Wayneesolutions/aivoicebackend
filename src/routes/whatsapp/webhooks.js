@@ -12,6 +12,7 @@ const router = require('express').Router()
 const crypto = require('crypto')
 const prisma = require('../../lib/prisma')
 const { processCallOutcome } = require('../../services/waOptIn')
+const { handleTemplateStatusWebhook } = require('../../services/waTemplates')
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -85,7 +86,15 @@ router.post('/meta', async (req, res) => {
       for (const change of entry.changes || []) {
         const value = change.value || {}
 
-        // a) Delivery / read status updates for our outbound messages
+        // a) Template status updates (APPROVED / REJECTED by Meta)
+        if (change.field === 'message_template_status_update') {
+          await handleTemplateStatusWebhook(value).catch(e =>
+            console.error('[wa/webhook/meta] template status error:', e.message)
+          )
+          continue
+        }
+
+        // b) Delivery / read status updates for our outbound messages
         for (const st of value.statuses || []) {
           const statusMap = { sent: 'SENT', delivered: 'DELIVERED', read: 'READ', failed: 'FAILED' }
           const status    = statusMap[st.status]

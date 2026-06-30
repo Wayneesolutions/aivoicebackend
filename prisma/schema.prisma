@@ -68,6 +68,8 @@ model Tenant {
   leadBatches          LeadBatch[]
   waContactLists       WaContactList[]
   waCampaigns          WaCampaign[]
+  waTemplateRequests   WaTemplateRequest[]
+  waTenantConfig       WaTenantConfig?
 }
 
 enum TenantStatus {
@@ -619,4 +621,49 @@ enum WaMessageStatus {
   READ
   FAILED
   RECEIVED
+}
+
+enum WaTemplateStatus {
+  DRAFT
+  PENDING_ADMIN
+  ADMIN_REJECTED
+  SUBMITTED_TO_META
+  APPROVED
+  META_REJECTED
+}
+
+// Per-tenant WhatsApp credentials — falls back to env vars when absent
+model WaTenantConfig {
+  id            String   @id @default(cuid())
+  tenantId      String   @unique
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  wabaId        String?
+  phoneNumberId String?
+  accessToken   String?  @db.Text
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model WaTemplateRequest {
+  id                  String           @id @default(cuid())
+  tenantId            String
+  tenant              Tenant           @relation(fields: [tenantId], references: [id])
+  name                String
+  category            String           @default("MARKETING")
+  languageCode        String           @default("en")
+  headerText          String?
+  bodyText            String           @db.Text
+  footerText          String?
+  buttons             Json?
+  status              WaTemplateStatus @default(DRAFT)
+  adminNote           String?          @db.Text
+  metaTemplateId      String?
+  metaStatus          String?
+  metaRejectionReason String?          @db.Text
+  submittedAt         DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  @@index([tenantId])
+  @@index([status])
 }

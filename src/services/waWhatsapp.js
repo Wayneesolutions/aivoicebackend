@@ -103,7 +103,7 @@ async function runCampaign({ campaignId, contactListId, templateName, languageCo
     recipients.map(contact => limit(async () => {
       const components = typeof buildComponents === 'function'
         ? buildComponents(contact)
-        : [{ type: 'body', parameters: [{ type: 'text', text: contact.fullName?.split(' ')[0] || 'there' }] }]
+        : []
 
       try {
         const wamid = await sendTemplate(contact.phone, templateName, languageCode, components)

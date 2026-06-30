@@ -9,6 +9,7 @@ const { requireAdmin } = require('../middleware/auth')
 const vapiService  = require('../services/vapi')
 const storageService = require('../services/storage')
 const { sendClientWelcome } = require('../services/email')
+const { submitTemplateToMeta } = require('../services/waTemplates')
 
 // Multer memory storage — file sent to S3 or disk via storageService
 const logoUpload = multer({
@@ -950,6 +951,70 @@ router.post('/calls/cleanup-stale', async (req, res, next) => {
     })
 
     res.json({ staleCleaned: stale.length, bogusReset: bogus.count })
+  } catch (err) { next(err) }
+})
+
+// ── WHATSAPP TEMPLATE REVIEW ───────────────────────────────────────────────────
+
+// GET /api/admin/wa-templates — all pending + recently submitted
+router.get('/wa-templates', async (req, res, next) => {
+  try {
+    const { status } = req.query
+    const where = status ? { status } : { status: { in: ['PENDING_ADMIN', 'SUBMITTED_TO_META', 'APPROVED', 'META_REJECTED', 'ADMIN_REJECTED'] } }
+    const templates = await prisma.waTemplateRequest.findMany({
+      where,
+      include: { tenant: { select: { id: true, name: true, ownerEmail: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    res.json(templates)
+  } catch (err) { next(err) }
+})
+
+// POST /api/admin/wa-templates/:id/approve — submit to Meta
+router.post('/wa-templates/:id/approve', async (req, res, next) => {
+  try {
+    const tpl = await prisma.waTemplateRequest.findUnique({ where: { id: req.params.id } })
+    if (!tpl) return res.status(404).json({ error: 'Template not found' })
+    if (tpl.status !== 'PENDING_ADMIN') return res.status(400).json({ error: `Template is ${tpl.status}, not PENDING_ADMIN` })
+
+    const metaRes = await submitTemplateToMeta(tpl.id)
+    const updated = await prisma.waTemplateRequest.findUnique({ where: { id: tpl.id } })
+    res.json({ template: updated, meta: metaRes })
+  } catch (err) { next(err) }
+})
+
+// POST /api/admin/wa-templates/:id/reject — reject with admin note
+router.post('/wa-templates/:id/reject', async (req, res, next) => {
+  try {
+    const { note } = req.body
+    const tpl = await prisma.waTemplateRequest.findUnique({ where: { id: req.params.id } })
+    if (!tpl) return res.status(404).json({ error: 'Template not found' })
+
+    const updated = await prisma.waTemplateRequest.update({
+      where: { id: tpl.id },
+      data:  { status: 'ADMIN_REJECTED', adminNote: note?.trim() || null },
+    })
+    res.json(updated)
+  } catch (err) { next(err) }
+})
+
+// GET/PUT /api/admin/tenants/:id/wa-config — view / set per-tenant WABA credentials
+router.get('/tenants/:id/wa-config', async (req, res, next) => {
+  try {
+    const cfg = await prisma.waTenantConfig.findUnique({ where: { tenantId: req.params.id } })
+    res.json(cfg || {})
+  } catch (err) { next(err) }
+})
+
+router.put('/tenants/:id/wa-config', async (req, res, next) => {
+  try {
+    const { wabaId, phoneNumberId, accessToken } = req.body
+    const cfg = await prisma.waTenantConfig.upsert({
+      where:  { tenantId: req.params.id },
+      update: { wabaId: wabaId || null, phoneNumberId: phoneNumberId || null, accessToken: accessToken || null },
+      create: { tenantId: req.params.id, wabaId: wabaId || null, phoneNumberId: phoneNumberId || null, accessToken: accessToken || null },
+    })
+    res.json(cfg)
   } catch (err) { next(err) }
 })
 
