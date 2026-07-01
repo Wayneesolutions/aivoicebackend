@@ -25,19 +25,21 @@ function pLimit(concurrency) {
   })
 }
 
-function waClient() {
+function waClient(creds = {}) {
+  const token   = creds.accessToken   || process.env.WA_ACCESS_TOKEN
   return axios.create({
     baseURL: `https://graph.facebook.com/${process.env.WA_GRAPH_VERSION || 'v21.0'}`,
     headers: {
-      Authorization:  `Bearer ${process.env.WA_ACCESS_TOKEN}`,
+      Authorization:  `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     timeout: 15000,
   })
 }
 
-async function postMessage(payload) {
-  const res = await waClient().post(`/${process.env.WA_PHONE_NUMBER_ID}/messages`, {
+async function postMessage(payload, creds = {}) {
+  const phoneNumberId = creds.phoneNumberId || process.env.WA_PHONE_NUMBER_ID
+  const res = await waClient(creds).post(`/${phoneNumberId}/messages`, {
     messaging_product: 'whatsapp',
     recipient_type:    'individual',
     ...payload,
@@ -50,8 +52,9 @@ async function postMessage(payload) {
  * `components` follows Meta's template component spec — pass variable values here.
  * Example for a body with {{1}} = first name:
  *   [{ type: "body", parameters: [{ type: "text", text: "Priya" }] }]
+ * `creds` allows per-tenant override of { phoneNumberId, accessToken }.
  */
-async function sendTemplate(toE164, templateName, languageCode = 'en', components = []) {
+async function sendTemplate(toE164, templateName, languageCode = 'en', components = [], creds = {}) {
   return postMessage({
     to:       toE164.replace('+', ''),
     type:     'template',
@@ -60,7 +63,7 @@ async function sendTemplate(toE164, templateName, languageCode = 'en', component
       language: { code: languageCode },
       ...(components.length ? { components } : {}),
     },
-  })
+  }, creds)
 }
 
 /**
@@ -68,12 +71,12 @@ async function sendTemplate(toE164, templateName, languageCode = 'en', component
  * Only valid inside the 24-h customer service window (after the contact messaged us).
  * Meta will reject this outside that window — use sendTemplate instead.
  */
-async function sendText(toE164, body) {
+async function sendText(toE164, body, creds = {}) {
   return postMessage({
     to:   toE164.replace('+', ''),
     type: 'text',
     text: { preview_url: false, body },
-  })
+  }, creds)
 }
 
 /**
@@ -81,10 +84,11 @@ async function sendText(toE164, body) {
  * contact in the given list. Logs a WaMessage row per send attempt (success or fail).
  *
  * buildComponents(contact) → Meta component array (optional; fills {{1}} with first name by default)
+ * creds: { phoneNumberId, accessToken } — per-tenant override; falls back to env vars.
  *
  * @returns {{ sent, failed, attempted }}
  */
-async function runCampaign({ campaignId, contactListId, templateName, languageCode = 'en', buildComponents }) {
+async function runCampaign({ campaignId, contactListId, templateName, languageCode = 'en', buildComponents, creds = {} }) {
   // THE GATE — enforced at the DB query level, not in JS afterwards.
   // No parameter or flag can bypass this.
   const recipients = await prisma.waContact.findMany({
@@ -106,7 +110,7 @@ async function runCampaign({ campaignId, contactListId, templateName, languageCo
         : []
 
       try {
-        const wamid = await sendTemplate(contact.phone, templateName, languageCode, components)
+        const wamid = await sendTemplate(contact.phone, templateName, languageCode, components, creds)
         await prisma.waMessage.create({
           data: {
             contactId:   contact.id,

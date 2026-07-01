@@ -29,6 +29,10 @@ const voiceUpload = multer({
 
 router.get('/me', requireTenantUser, async (req, res) => {
   const t = req.tenant
+
+  // Check if admin has completed WA setup for this tenant
+  const waConfig = await prisma.waTenantConfig.findUnique({ where: { tenantId: t.id } })
+
   res.json({
     id: t.id, name: t.name, slug: t.slug,
     ownerName: t.ownerName || null,
@@ -50,18 +54,27 @@ router.get('/me', requireTenantUser, async (req, res) => {
       minutesIncluded: t.plan.minutesIncluded,
       features: t.plan.features || [],
     } : null,
+    waRequestedPhone: t.waRequestedPhone || null,
+    hasWaConfig: !!(waConfig?.phoneNumberId),
   })
 })
 
-// PATCH /api/tenant/profile — update company name, owner name, brand colour
+// PATCH /api/tenant/profile — update company name, owner name, brand colour, WA request
 router.patch('/profile', requireTenantOwner, async (req, res, next) => {
   try {
-    const allowed = ['name', 'ownerName', 'primaryColor']
+    const allowed = ['name', 'ownerName', 'primaryColor', 'waRequestedPhone']
     const data = {}
     allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k] })
+    // Allow explicit null/empty string to clear the WA phone
+    if (req.body.waRequestedPhone === '') data.waRequestedPhone = null
     if (!Object.keys(data).length) return res.status(400).json({ error: 'No valid fields provided' })
     const tenant = await prisma.tenant.update({ where: { id: req.tenant.id }, data })
-    res.json({ name: tenant.name, ownerName: tenant.ownerName, primaryColor: tenant.primaryColor })
+    res.json({
+      name: tenant.name,
+      ownerName: tenant.ownerName,
+      primaryColor: tenant.primaryColor,
+      waRequestedPhone: tenant.waRequestedPhone || null,
+    })
   } catch (err) { next(err) }
 })
 

@@ -6,21 +6,21 @@ const { triggerCampaign, drainCampaignJobs } = require('../workers/dialQueue')
 
 router.get('/', requireTenantUser, async (req, res, next) => {
   try {
-    const campaigns = await prisma.campaign.findMany({
-      where: { tenantId: req.tenant.id },
-      include: {
-        script: { select: { id: true, name: true, status: true, agentName: true } },
-        _count: { select: { leads: true, calls: true } }
-      },
-      orderBy: { createdAt: 'desc' }
-    })
-
-    const ids = campaigns.map(c => c.id)
-    const outcomeRows = await prisma.call.groupBy({
-      by: ['campaignId', 'outcome'],
-      where: { campaignId: { in: ids }, status: 'COMPLETED', outcome: { not: null } },
-      _count: { id: true }
-    })
+    const [campaigns, outcomeRows] = await Promise.all([
+      prisma.campaign.findMany({
+        where: { tenantId: req.tenant.id },
+        include: {
+          script: { select: { id: true, name: true, status: true, agentName: true } },
+          _count: { select: { leads: true, calls: true } }
+        },
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.call.groupBy({
+        by: ['campaignId', 'outcome'],
+        where: { tenantId: req.tenant.id, campaignId: { not: null }, status: 'COMPLETED', outcome: { not: null } },
+        _count: { id: true }
+      })
+    ])
 
     const outcomeMap = {}
     outcomeRows.forEach(row => {

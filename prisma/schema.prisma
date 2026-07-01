@@ -55,6 +55,9 @@ model Tenant {
   clonedVoiceId   String?   // ElevenLabs voice_id
   clonedVoiceName String?   // human-readable name the client gave it
 
+  // WhatsApp — client-submitted number request (admin reads this and sets WaTenantConfig)
+  waRequestedPhone String?
+
   // Relations
   phoneNumbers         TenantPhone[]
   campaigns            Campaign[]
@@ -280,6 +283,10 @@ model Lead {
   updatedAt       DateTime    @updatedAt
 
   calls           Call[]
+
+  @@index([tenantId])
+  @@index([campaignId])
+  @@index([tenantId, status])
 }
 
 enum LeadStatus {
@@ -340,6 +347,12 @@ model Call {
   startedAt       DateTime?
   endedAt         DateTime?
   createdAt       DateTime    @default(now())
+
+  @@index([tenantId])
+  @@index([campaignId])
+  @@index([tenantId, status])
+  @@index([campaignId, status, outcome])
+  @@index([createdAt])
 }
 
 enum CallStatus {
@@ -647,7 +660,7 @@ model WaTenantConfig {
 model WaTemplateRequest {
   id                  String           @id @default(cuid())
   tenantId            String
-  tenant              Tenant           @relation(fields: [tenantId], references: [id])
+  tenant              Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name                String
   category            String           @default("MARKETING")
   languageCode        String           @default("en")

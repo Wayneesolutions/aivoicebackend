@@ -343,14 +343,27 @@ async function dialLead(job) {
     console.error(`[dialQueue] Could not build call history / fetch script language for lead ${leadId}:`, err.message)
   }
 
-  const vapiCall = await vapiService.startOutboundCall({
-    toNumber, vapiNumberId, vapiAssistantId,
-    voiceOverrideId: clonedVoiceId || undefined,
-    systemPromptOverride,
-    language: scriptLanguage,
-    agentGender: scriptGender,
-    metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
-  })
+  let vapiCall
+  try {
+    vapiCall = await vapiService.startOutboundCall({
+      toNumber, vapiNumberId, vapiAssistantId,
+      voiceOverrideId: clonedVoiceId || undefined,
+      systemPromptOverride,
+      language: scriptLanguage,
+      agentGender: scriptGender,
+      metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
+    })
+  } catch (err) {
+    const is400 = err.response?.status === 400
+    const msg   = JSON.stringify(err.response?.data?.message || '')
+    if (is400 && (msg.toLowerCase().includes('e.164') || msg.toLowerCase().includes('phone number'))) {
+      console.warn(`[dialQueue] Lead ${leadId} has invalid phone (${toNumber}) — marked WRONG_NUMBER, will not retry`)
+      await prisma.lead.update({ where: { id: leadId }, data: { status: 'WRONG_NUMBER' } }).catch(() => {})
+      await prisma.call.update({ where: { id: callRecord.id }, data: { status: 'COMPLETED', outcome: 'NO_ANSWER', endedAt: new Date() } }).catch(() => {})
+      return
+    }
+    throw err
+  }
 
   await prisma.call.update({
     where: { id: callRecord.id },

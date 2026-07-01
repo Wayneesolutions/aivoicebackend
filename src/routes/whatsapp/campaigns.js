@@ -61,12 +61,21 @@ router.post('/:id/send', requireTenantOwner, async (req, res, next) => {
       return res.json({ sent: 0, failed: 0, attempted: 0, message: 'No opted-in contacts in this list' })
     }
 
+    // Resolve per-tenant WhatsApp credentials (falls back to env vars in runCampaign)
+    const waConfig = await prisma.waTenantConfig.findUnique({
+      where: { tenantId: req.tenant.id },
+    })
+    const creds = waConfig
+      ? { phoneNumberId: waConfig.phoneNumberId || undefined, accessToken: waConfig.accessToken || undefined }
+      : {}
+
     // Send immediately — for large lists consider a queue; for now this is direct
     const result = await runCampaign({
       campaignId:   campaign.id,
       contactListId,
       templateName: campaign.templateName,
       languageCode: campaign.languageCode,
+      creds,
     })
 
     res.json(result)
