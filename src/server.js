@@ -20,6 +20,10 @@ const axios   = require('axios')
 const app        = express()
 const httpServer = createServer(app)
 
+// Trust the first proxy (nginx / AWS ALB) so express-rate-limit reads the
+// real client IP from X-Forwarded-For instead of the internal proxy address.
+app.set('trust proxy', 1)
+
 // Static: only the logos subfolder is publicly accessible
 app.use('/uploads/logos', express.static(require('path').join(__dirname, '../uploads/logos')))
 
