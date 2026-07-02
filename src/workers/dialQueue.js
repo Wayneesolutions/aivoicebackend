@@ -107,6 +107,9 @@ async function runScheduler(campaignId = null) {
 
   console.log(`[dialQueue] Scanning ${activeCampaigns.length} active campaign(s)`)
 
+  const intervalMs = Math.floor(60_000 / CALLS_PER_MINUTE) // e.g. 30 000ms for 2/min
+  let delayIndex = 0
+
   for (const campaign of activeCampaigns) {
     if (!campaign.script?.isActive) {
       console.log(`[dialQueue] Campaign "${campaign.name}" — script not active, skipping`)
@@ -224,8 +227,10 @@ async function runScheduler(campaignId = null) {
         leadTitle:       lead.title   || ''
       }, {
         attempts: 1,      // No BullMQ auto-retry: if the job throws after vapiService.startOutboundCall
-        timeout: 45000    // succeeds, a retry would make a second real phone call. Scheduler handles retries.
+        timeout: 45000,   // succeeds, a retry would make a second real phone call. Scheduler handles retries.
+        delay: delayIndex * intervalMs  // evenly space calls: job 0 fires now, job 1 in 30s, job 2 in 60s …
       })
+      delayIndex++
     }
   }
 }
@@ -437,7 +442,7 @@ async function startWorker() {
   schedulerWorker.on('error', (err) => { if (!_swErrLogged) { console.error('[dialQueue/schedulerWorker] Redis unavailable:', err.message); _swErrLogged = true } })
   callWorker.on('error',      (err) => { if (!_cwErrLogged) { console.error('[dialQueue/callWorker] Redis unavailable:',      err.message); _cwErrLogged = true } })
 
-  console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, rate: ${CALLS_PER_MINUTE}/min, scheduler: every 5min`)
+  console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, rate: ${CALLS_PER_MINUTE}/min (${Math.floor(60_000 / CALLS_PER_MINUTE / 1000)}s spacing), scheduler: every 5min`)
 }
 
 async function triggerCampaign(campaignId) {
