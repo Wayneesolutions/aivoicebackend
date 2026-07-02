@@ -163,7 +163,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       systemPrompt: genderInstruction + (systemPrompt || ''),
       tools: getVapiFunctions(),
       temperature: 0.6,
-      maxTokens: 60,
+      maxTokens: 150,
     },
     voice: {
       provider: '11labs',
@@ -182,7 +182,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       model: 'nova-3',
       language: deepgramLang,
       smartFormat: true,
-      endpointing: 10,
+      endpointing: 300,
       ...transcriberExtra,
     },
     // FIX BUG-D: was hardcoded English. Now matches the script's language and agent gender.

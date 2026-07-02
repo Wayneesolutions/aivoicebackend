@@ -183,7 +183,8 @@ function getVapiFunctions() {
           },
           required: ['reason']
         }
-      }
+      },
+      server: { url: serverUrl, secret: serverSecret }
     },
     {
       // NEW — detect_sentiment: AI reports prospect mood every 3 exchanges

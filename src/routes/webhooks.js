@@ -539,6 +539,31 @@ async function handleToolCalls(event) {
           })
         }
         result = 'ok'
+      } else if (name === 'end_call' || name === 'endCall') {
+        const call       = event.call
+        const callRecord = await prisma.call.findFirst({ where: { vapiCallId: call?.id } })
+        const reason     = (args.reason || '').toUpperCase()
+        if (callRecord) {
+          // Don't downgrade an outcome a more specific tool-call already set
+          // (e.g. book_meeting already fired BOOKED before end_call hangs up).
+          const alreadySet = callRecord.outcome && callRecord.outcome !== 'ERROR'
+          if (!alreadySet && ['BOOKED','NOT_INTERESTED','CALLBACK','WRONG_NUMBER','OPTED_OUT','VOICEMAIL'].includes(reason)) {
+            await prisma.call.update({
+              where: { id: callRecord.id },
+              data: { outcome: reason, summary: args.summary || undefined }
+            })
+            const leadData = { status: reason }
+            if (reason === 'OPTED_OUT') {
+              leadData.isOptedOut = true
+              leadData.optedOutAt = new Date()
+            }
+            await prisma.lead.update({
+              where: { id: callRecord.leadId },
+              data: leadData
+            })
+          }
+        }
+        result = `Call ended — reason: ${reason || 'unspecified'}`
       } else {
         result = `Unknown function: ${name}`
       }
