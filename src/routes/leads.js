@@ -182,7 +182,18 @@ router.get('/batches', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// DELETE /api/leads/:id — opt out
+// PATCH /api/leads/:id/opt-out — mark lead as opted out (preserves the record for suppression)
+router.patch('/:id/opt-out', requireTenantOwner, async (req, res, next) => {
+  try {
+    await prisma.lead.update({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      data: { status: 'OPTED_OUT', isOptedOut: true, optedOutAt: new Date() }
+    })
+    res.json({ message: 'Lead opted out' })
+  } catch (err) { next(err) }
+})
+
+// DELETE /api/leads/:id — kept for backwards compatibility, same behaviour as PATCH opt-out
 router.delete('/:id', requireTenantOwner, async (req, res, next) => {
   try {
     await prisma.lead.update({

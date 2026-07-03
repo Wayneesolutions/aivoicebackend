@@ -236,6 +236,11 @@ async function handleCallEnded(event) {
   const summary      = analysis.summary || null
   const recordingUrl = artifact.recordingUrl || null
 
+  // Compliance override: scan transcript for explicit removal/opt-out language.
+  // Runs AFTER the AI tool-call outcome is set, so it catches cases where the AI
+  // called markNotInterested instead of end_call(OPTED_OUT) for a removal request.
+  const finalOutcome = outcome !== 'BOOKED' ? detectOptOut(transcript, summary, outcome) : outcome
+
   const billedMinutes = Math.ceil(durationSeconds / 6) / 10
   const billedAmount  = billedMinutes * callRecord.tenant.ratePerMinute
 
@@ -243,15 +248,21 @@ async function handleCallEnded(event) {
     where: { id: callRecord.id },
     data: {
       status: 'COMPLETED',
-      outcome, durationSeconds, transcript, summary, recordingUrl,
+      outcome: finalOutcome, durationSeconds, transcript, summary, recordingUrl,
       billedMinutes, billedAmount,
       endedAt: new Date()
     }
   })
 
+  const leadStatusData = { status: outcomeToLeadStatus(finalOutcome) }
+  if (finalOutcome === 'OPTED_OUT') {
+    leadStatusData.isOptedOut = true
+    leadStatusData.optedOutAt = new Date()
+  }
+
   await prisma.lead.update({
     where: { id: callRecord.leadId },
-    data: { status: outcomeToLeadStatus(outcome) }
+    data: leadStatusData
   })
 
   if (billedMinutes > 0) {
@@ -286,8 +297,8 @@ async function handleCallEnded(event) {
     )
   }
 
-  if (outcome !== 'BOOKED') {
-    await crmService.syncContact(callRecord.tenantId, callRecord.leadId, outcome).catch(err =>
+  if (finalOutcome !== 'BOOKED') {
+    await crmService.syncContact(callRecord.tenantId, callRecord.leadId, finalOutcome).catch(err =>
       console.error('[webhook] CRM sync failed:', err.message)
     )
   }
@@ -614,6 +625,95 @@ async function handleFunctionCall(event) {
   }
 }
 
+// Tier 1: Explicit DNC requests — unambiguous "remove me / stop calling" language
+const OPT_OUT_PHRASES = [
+  'remove me from your call list',
+  'remove me from the call list',
+  'remove me from your calling list',
+  'take me off the calling list',
+  'take me off your calling list',
+  'take me off your call list',
+  'take me off your list',
+  'take me off the list',
+  'remove me from your list',
+  'please remove me',
+  'stop calling me',
+  'do not call me again',
+  "don't call me again",
+  'add me to your do not call',
+  'put me on your do not call',
+  'opt me out',
+]
+
+// Tier 2: Soft opt-out — rejection combined with a clear "don't call back / don't contact"
+// signal. "We don't need services" alone is NOT_INTERESTED (may want services later).
+// But pairing it with a permanence word ("don't call back", "ever", "anymore") makes it
+// a real suppression request that must be honoured.
+const SOFT_OPT_OUT_PHRASES = [
+  // "don't call us" variants (main list covers "me"; these cover "us" / teams / businesses)
+  "please don't call us anymore",
+  "please don't call us again",
+  "please don't call again",
+  "please don't call back",
+  "don't call us again",
+  "don't call us back",
+  "don't call us anymore",
+  "never call us again",
+  "never call me again",
+
+  // "don't contact us"
+  "please don't contact us",
+  "don't contact us again",
+  "do not contact us again",
+  "do not contact us",
+  "we don't want to be contacted",
+  "we do not want to be contacted",
+
+  // "please stop" broader forms (without explicit "me" — already covered above)
+  "please stop calling",
+  "please stop contacting",
+
+  // Permanence rejection: "ever / anymore / never"
+  "not interested now or ever",
+  "not interested, ever",
+  "we will never need your services",
+  "we'll never need your services",
+  "will never need your services",
+  "we never want to hear from you",
+  "we don't want any more calls",
+  "we don't want any calls from you",
+  "we don't want to receive calls",
+
+  // Service rejection — clear "we have no need" statements
+  "we don't need any services",
+  "we don't need your services",
+  "don't need any services",
+  "don't need your services",
+  "no need for your services",
+  "not interested in any services",
+  "we have no need for your services",
+  "we don't require any services",
+]
+
+function detectOptOut(transcript, summary, currentOutcome) {
+  if (currentOutcome === 'OPTED_OUT' || currentOutcome === 'BOOKED') return currentOutcome
+  const text = ((transcript || '') + ' ' + (summary || '')).toLowerCase()
+
+  const tier1 = OPT_OUT_PHRASES.find(phrase => text.includes(phrase))
+  if (tier1) {
+    console.log(`[webhook] detectOptOut: explicit opt-out phrase ("${tier1}") — overriding ${currentOutcome} → OPTED_OUT`)
+    return 'OPTED_OUT'
+  }
+
+  const tier2 = SOFT_OPT_OUT_PHRASES.find(phrase => text.includes(phrase))
+  if (tier2) {
+    console.log(`[webhook] detectOptOut: soft opt-out phrase ("${tier2}") — overriding ${currentOutcome} → OPTED_OUT`)
+    return 'OPTED_OUT'
+  }
+
+  return currentOutcome
+}
+
 function mapVapiEndReason(reason) {
   if (!reason) return null
   const r = reason.toLowerCase()
@@ -633,8 +733,10 @@ function outcomeToLeadStatus(outcome) {
     BOOKED:         'BOOKED',
     CALLBACK:       'CALLBACK',
     NOT_INTERESTED: 'NOT_INTERESTED',
+    OPTED_OUT:      'OPTED_OUT',
     VOICEMAIL:      'VOICEMAIL',
     NO_ANSWER:      'NO_ANSWER',
+    WRONG_NUMBER:   'WRONG_NUMBER',
     ERROR:          'NO_ANSWER'
   }
   return map[outcome] || 'NO_ANSWER'

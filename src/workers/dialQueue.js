@@ -187,6 +187,24 @@ async function runScheduler(campaignId = null) {
         const dayName = ['SUN','MON','TUE','WED','THU','FRI','SAT'][inTz.getDay()]
         console.log(`[dialQueue] Campaign "${campaign.name}" — outside hours (${dayName} ${hour}:00) and no scheduled callbacks due`)
       }
+
+      // Auto-complete: if no eligible leads remain AND no leads are still callable,
+      // mark the campaign COMPLETED so it stops showing as ACTIVE.
+      const stillCallable = await prisma.lead.count({
+        where: {
+          campaignId: campaign.id,
+          isOptedOut: false,
+          callAttempts: { lt: campaign.maxAttempts },
+          status: { in: ['PENDING', 'CALLING', 'NO_ANSWER', 'VOICEMAIL', 'CALLBACK'] }
+        }
+      })
+      if (stillCallable === 0) {
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { status: 'COMPLETED', completedAt: new Date() }
+        })
+        console.log(`[dialQueue] Campaign "${campaign.name}" — all leads exhausted, marked COMPLETED`)
+      }
       continue
     }
 
