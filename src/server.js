@@ -132,7 +132,7 @@ async function verifyBaseUrlReachable() {
 
 const PORT = process.env.PORT || 3001
 httpServer.listen(PORT, () => {
-  console.log(`VoCallM backend running on port ${PORT}`)
+  console.log(`Quor backend running on port ${PORT}`)
   require('./workers/dialQueue').startWorker()
   verifyBaseUrlReachable()
 })

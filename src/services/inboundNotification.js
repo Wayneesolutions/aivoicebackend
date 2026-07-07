@@ -22,7 +22,7 @@ async function notifyCallEnded({ callerNumber, outcome, summary, businessName, o
     `⏱ Duration: ${durationText}\n` +
     `📋 Outcome: ${outcome}\n\n` +
     `💬 Summary:\n${summary || 'No summary available'}\n\n` +
-    `_Powered by VoCallM_`;
+    `_Powered by Quor_`;
 
   try {
     const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);

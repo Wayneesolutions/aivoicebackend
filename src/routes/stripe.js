@@ -20,7 +20,7 @@ router.post('/setup-intent', requireTenantOwner, async (req, res, next) => {
       const customer = await stripe.customers.create({
         name:  tenant.name,
         email: tenant.ownerEmail || req.user.email,
-        description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+        description: `Quor client — ${tenant.ownerName || tenant.name}`,
         metadata: { tenantId: tenant.id, ownerName: tenant.ownerName || '', ownerEmail: tenant.ownerEmail || '' }
       })
       customerId = customer.id
@@ -142,7 +142,7 @@ router.post('/invoice', requireTenantOwner, async (req, res, next) => {
     await stripe.customers.update(tenant.stripeCustomerId, {
       name:  tenant.name,
       email: tenant.ownerEmail,
-      description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+      description: `Quor client — ${tenant.ownerName || tenant.name}`,
       metadata: { tenantId: tenant.id }
     })
 
@@ -162,14 +162,14 @@ router.post('/invoice', requireTenantOwner, async (req, res, next) => {
       customer:          tenant.stripeCustomerId,
       auto_advance:      true,
       collection_method: 'charge_automatically',
-      description:       `VoCallM AI Calling — ${periodLabel}`,
+      description:       `Quor AI Calling — ${periodLabel}`,
       custom_fields: [
         { name: 'Plan',           value: planLabel },
         { name: 'Billing period', value: periodLabel },
         { name: 'Minutes used',   value: `${minutes} min` },
         { name: 'Rate',           value: `$${parseFloat(tenant.ratePerMinute).toFixed(2)}/min` },
       ],
-      footer: 'VoCallM by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
+      footer: 'Quor by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
       metadata: { tenantId: tenant.id, month: month || new Date().toISOString().slice(0, 7) }
     })
 
@@ -238,7 +238,7 @@ router.post('/checkout', requireTenantOwner, async (req, res, next) => {
       const customer = await stripe.customers.create({
         name:  tenant.name,
         email: tenant.ownerEmail || req.user.email,
-        description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+        description: `Quor client — ${tenant.ownerName || tenant.name}`,
         metadata: { tenantId: tenant.id, ownerName: tenant.ownerName || '', ownerEmail: tenant.ownerEmail || '' }
       })
       customerId = customer.id
@@ -255,7 +255,7 @@ router.post('/checkout', requireTenantOwner, async (req, res, next) => {
     let priceId = plan.stripePriceId
     if (!priceId) {
       const product = await stripe.products.create({
-        name: `VoCallM ${plan.name} Plan`,
+        name: `Quor ${plan.name} Plan`,
         metadata: { planId: plan.id }
       })
       const price = await stripe.prices.create({
@@ -303,7 +303,7 @@ router.post('/checkout', requireTenantOwner, async (req, res, next) => {
       metadata:   { tenantId: tenant.id, planId: plan.id },
       subscription_data: {
         metadata:    { tenantId: tenant.id, planId: plan.id },
-        description: `VoCallM ${plan.name} Plan — ${tenant.name}`,
+        description: `Quor ${plan.name} Plan — ${tenant.name}`,
       },
       success_url: `${origin}/checkout/success`,
       cancel_url:  `${origin}/portal/billing?checkout=cancelled`,
@@ -377,12 +377,12 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
         try {
           await stripe.invoices.update(inv.id, {
-            description: `VoCallM ${tenant.plan?.name || 'Plan'} — ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`,
+            description: `Quor ${tenant.plan?.name || 'Plan'} — ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`,
             custom_fields: [
               { name: 'Plan',   value: tenant.plan?.name || 'Subscription' },
               { name: 'Client', value: tenant.name },
             ],
-            footer: 'VoCallM by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
+            footer: 'Quor by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
           })
         } catch (e) {
           console.error('[stripe] Could not update draft invoice:', e.message)

@@ -13,10 +13,17 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 // GET /api/leads — tenant's leads with filters
 router.get('/', requireTenantUser, async (req, res, next) => {
   try {
-    const { status, campaignId, unassigned, page = 1, limit = 50 } = req.query
+    const { status, campaignId, unassigned, search, page = 1, limit = 50 } = req.query
     const where = { tenantId: req.tenant.id }
     if (status)               where.status     = status
     if (campaignId)           where.campaignId = campaignId
+    if (search) {
+      where.OR = [
+        { name:  { contains: search, mode: 'insensitive' } },
+        { phone: { contains: search } },
+        { company: { contains: search, mode: 'insensitive' } },
+      ]
+    }
     if (unassigned === 'true') {
       where.campaignId  = null
       where.isOptedOut  = false

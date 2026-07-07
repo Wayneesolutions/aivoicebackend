@@ -71,7 +71,7 @@ async function buyTwilio(number) {
   const client = getTwilioClient()
   const purchased = await client.incomingPhoneNumbers.create({
     phoneNumber:  number,
-    friendlyName: `VoCallM — ${number}`,
+    friendlyName: `Quor — ${number}`,
   })
   return { twilioSid: purchased.sid, plivoUuid: null }
 }

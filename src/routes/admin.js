@@ -657,7 +657,7 @@ router.post('/billing/invoice', async (req, res, next) => {
     await stripe.customers.update(tenant.stripeCustomerId, {
       name:        tenant.name,
       email:       tenant.ownerEmail,
-      description: `VoCallM client — ${tenant.ownerName || tenant.name}`,
+      description: `Quor client — ${tenant.ownerName || tenant.name}`,
       metadata:    { tenantId: tenant.id }
     })
 
@@ -676,14 +676,14 @@ router.post('/billing/invoice', async (req, res, next) => {
       customer:          tenant.stripeCustomerId,
       auto_advance:      true,
       collection_method: 'charge_automatically',
-      description:       `VoCallM AI Calling — ${periodLabel}`,
+      description:       `Quor AI Calling — ${periodLabel}`,
       custom_fields: [
         { name: 'Plan',           value: planLabel },
         { name: 'Billing period', value: periodLabel },
         { name: 'Minutes used',   value: `${totalMinutes.toFixed(1)} min` },
         { name: 'Rate',           value: `$${parseFloat(tenant.ratePerMinute).toFixed(2)}/min` },
       ],
-      footer: 'VoCallM by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
+      footer: 'Quor by Wayne E Solutions · support@vocallm.com · vocallm.com\nThank you for your business.',
       metadata: { tenantId, month: billMonth }
     })
 
@@ -838,11 +838,11 @@ router.get('/debug/lead-status-counts', async (req, res, next) => {
 
 // POST /api/admin/backfill-wa-opted-in
 // One-time (idempotent) backfill: scan every Lead with status=BOOKED and create
-// a WaContact (OPTED_IN) in that tenant's auto "VoCallM Opted-In" list.
+// a WaContact (OPTED_IN) in that tenant's auto "Quor Opted-In" list.
 // Safe to run multiple times — skips contacts that already exist.
 router.post('/backfill-wa-opted-in', async (req, res, next) => {
   try {
-    const WA_AUTO_LIST_NAME = 'VoCallM Opted-In'
+    const WA_AUTO_LIST_NAME = 'Quor Opted-In'
 
     const bookedLeads = await prisma.lead.findMany({
       where: { status: 'BOOKED' },

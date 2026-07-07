@@ -313,8 +313,8 @@ async function handleCallEnded(event) {
   }
 }
 
-// Per-tenant system list name — all leads who opt in via VoCallM calls land here.
-const WA_AUTO_LIST_NAME = 'VoCallM Opted-In'
+// Per-tenant system list name — all leads who opt in via Quor calls land here.
+const WA_AUTO_LIST_NAME = 'Quor Opted-In'
 
 async function bridgeLeadToWhatsApp(callRecord, recordingUrl) {
   const lead     = callRecord.lead

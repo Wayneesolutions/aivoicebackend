@@ -112,7 +112,8 @@ async function bookCalcom({ apiKey, eventTypeId, prospectName, prospectEmail, pr
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 15000
       }
     )
 
@@ -145,7 +146,8 @@ async function getAvailableSlots({ tenant, dateFrom, dateTo }) {
       endTime:      dateTo,
       usernameList: [username]
     },
-    headers: { Authorization: `Bearer ${apiKey}` }
+    headers: { Authorization: `Bearer ${apiKey}` },
+    timeout: 10000
   })
 
   // Return next 4 available slots

@@ -26,7 +26,7 @@ function mapOutcome(raw) {
 }
 
 /**
- * Called when a VoCallM / Vapi opt-in call finishes.
+ * Called when a Quor / Vapi opt-in call finishes.
  * Finds the WaContact by contactId (from call metadata) or vocallmCallId,
  * updates the CallAttempt, and sets the contact's optInStatus.
  *
