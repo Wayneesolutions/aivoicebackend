@@ -111,6 +111,7 @@ router.post('/upload', requireTenantOwner, upload.single('file'), async (req, re
     const toCreate = []
     for (const p of parsed) {
       if (existingPhones.has(p.phone) || seenInBatch.has(p.phone)) {
+        results.errors.push(`${p.name} (${p.phone}): already exists in the system -- skipped as duplicate`)
         results.skipped++
         continue
       }

@@ -239,7 +239,7 @@ async function handleCallEnded(event) {
   // Compliance override: scan transcript for explicit removal/opt-out language.
   // Runs AFTER the AI tool-call outcome is set, so it catches cases where the AI
   // called markNotInterested instead of end_call(OPTED_OUT) for a removal request.
-  const finalOutcome = outcome !== 'BOOKED' ? detectOptOut(transcript, summary, outcome) : outcome
+  const finalOutcome = outcome !== 'BOOKED' ? detectOptOut(transcript, summary, outcome, durationSeconds) : outcome
 
   const billedMinutes = Math.ceil(durationSeconds / 6) / 10
   const billedAmount  = billedMinutes * callRecord.tenant.ratePerMinute
@@ -695,8 +695,12 @@ const SOFT_OPT_OUT_PHRASES = [
   "we don't require any services",
 ]
 
-function detectOptOut(transcript, summary, currentOutcome) {
+function detectOptOut(transcript, summary, currentOutcome, durationSeconds) {
   if (currentOutcome === 'OPTED_OUT' || currentOutcome === 'BOOKED') return currentOutcome
+  // FIX (Jul 6): a call under 5s cannot contain a real opt-out request from the
+  // customer -- guards against any residual prompt/instruction text still causing a
+  // false match even after the formatTranscript system-role filter above.
+  if (typeof durationSeconds === 'number' && durationSeconds < 5) return currentOutcome
   const text = ((transcript || '') + ' ' + (summary || '')).toLowerCase()
 
   const tier1 = OPT_OUT_PHRASES.find(phrase => text.includes(phrase))
@@ -747,6 +751,12 @@ function formatTranscript(input) {
   if (typeof input === 'string') return input
   if (Array.isArray(input)) {
     return input
+      // FIX (Jul 6): exclude system-role messages -- these are the instructional
+      // prompt sent TO the AI (which necessarily contains example opt-out phrases like
+      // "remove me" / "stop calling" so the AI knows how to recognize them). Including
+      // them here made detectOptOut() below match against the AI's own instructions
+      // instead of anything the customer actually said.
+      .filter(m => (m.role || m.speaker || '').toLowerCase() !== 'system')
       .map(m => {
         const role = (m.role || m.speaker || 'unknown').toUpperCase()
         const text = m.content || m.message || m.text || ''
