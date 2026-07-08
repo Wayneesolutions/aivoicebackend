@@ -173,9 +173,6 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       similarityBoost: 0.75,
       useSpeakerBoost: true,
       optimizeStreamingLatency: 4,
-      ...(process.env.VAPI_ELEVENLABS_CREDENTIAL_ID
-        ? { credentialId: process.env.VAPI_ELEVENLABS_CREDENTIAL_ID }
-        : {}),
     },
     transcriber: {
       provider: 'deepgram',
@@ -239,9 +236,6 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
       stability: 0.5,
       similarityBoost: 0.75,
       useSpeakerBoost: true,
-      ...(process.env.VAPI_ELEVENLABS_CREDENTIAL_ID
-        ? { credentialId: process.env.VAPI_ELEVENLABS_CREDENTIAL_ID }
-        : {}),
     }
   }
 

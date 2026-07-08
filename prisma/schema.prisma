@@ -636,6 +636,22 @@ enum WaMessageStatus {
   RECEIVED
 }
 
+// ─────────────────────────────────────────────
+// ADMIN ALERTS
+// Platform-level alerts for the super admin (low credits, high spend)
+// ─────────────────────────────────────────────
+model AdminAlert {
+  id        String   @id @default(cuid())
+  type      String   // "ELEVENLABS_LOW" | "VAPI_HIGH"
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([isRead])
+  @@index([createdAt])
+}
+
 enum WaTemplateStatus {
   DRAFT
   PENDING_ADMIN

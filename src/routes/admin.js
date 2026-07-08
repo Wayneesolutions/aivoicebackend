@@ -493,6 +493,52 @@ router.post('/scripts/:id/resync', async (req, res, next) => {
   }
 })
 
+// POST /api/admin/scripts/resync-all — re-push ALL approved scripts to Vapi (e.g. after credential rotation)
+router.post('/scripts/resync-all', async (req, res, next) => {
+  try {
+    const scriptService = require('../services/script')
+    const scripts = await prisma.script.findMany({ where: { status: 'APPROVED' } })
+
+    let synced = 0, failed = 0
+    const errors = []
+
+    for (const script of scripts) {
+      try {
+        let existingAssistantId = null
+        try {
+          const stored = JSON.parse(script.compiledPrompt || '{}')
+          existingAssistantId = stored.vapiAssistantId || null
+        } catch {}
+
+        const compiledPrompt = scriptService.compileSystemPrompt(script)
+        const vapiAssistantId = await vapiService.upsertAssistant({
+          name: `${script.agentName} — ${script.id}`,
+          systemPrompt: compiledPrompt,
+          voiceId: script.voiceId,
+          agentName: script.agentName,
+          language: script.language || 'en',
+          agentGender: script.agentGender || 'female',
+          existingAssistantId,
+          maxCallDuration: script.maxCallDuration || 180
+        })
+
+        await prisma.script.update({
+          where: { id: script.id },
+          data: { compiledPrompt: JSON.stringify({ vapiAssistantId, prompt: compiledPrompt }) }
+        })
+        synced++
+      } catch (err) {
+        failed++
+        const detail = err.response?.data || err.message
+        errors.push({ scriptId: script.id, name: script.name, error: typeof detail === 'object' ? JSON.stringify(detail) : detail })
+        console.error('[resync-all] Failed for script', script.id, detail)
+      }
+    }
+
+    res.json({ total: scripts.length, synced, failed, errors })
+  } catch (err) { next(err) }
+})
+
 // POST /api/admin/scripts/:id/reject
 router.post('/scripts/:id/reject', async (req, res, next) => {
   try {
@@ -804,6 +850,46 @@ router.delete('/plans/:id', async (req, res, next) => {
     if (count > 0) return res.status(409).json({ error: `${count} tenant(s) are on this plan. Deactivate it instead.` })
     await prisma.plan.delete({ where: { id: req.params.id } })
     res.json({ message: 'Plan deleted' })
+  } catch (err) { next(err) }
+})
+
+// ── PLATFORM CREDITS & ALERTS ─────────────────────────
+
+const { getCredits } = require('../services/platformCredits')
+
+// GET /api/admin/platform-credits — live credit snapshot (5-min in-memory cache)
+router.get('/platform-credits', async (req, res, next) => {
+  try {
+    const data = await getCredits()
+    res.json(data)
+  } catch (err) { next(err) }
+})
+
+// GET /api/admin/alerts — all alerts, newest first
+router.get('/alerts', async (req, res, next) => {
+  try {
+    const alerts = await prisma.adminAlert.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    })
+    const unreadCount = alerts.filter(a => !a.isRead).length
+    res.json({ alerts, unreadCount })
+  } catch (err) { next(err) }
+})
+
+// PATCH /api/admin/alerts/:id/read — mark one alert read
+router.patch('/alerts/:id/read', async (req, res, next) => {
+  try {
+    await prisma.adminAlert.update({ where: { id: req.params.id }, data: { isRead: true } })
+    res.json({ ok: true })
+  } catch (err) { next(err) }
+})
+
+// POST /api/admin/alerts/mark-all-read — dismiss all unread alerts
+router.post('/alerts/mark-all-read', async (req, res, next) => {
+  try {
+    await prisma.adminAlert.updateMany({ where: { isRead: false }, data: { isRead: true } })
+    res.json({ ok: true })
   } catch (err) { next(err) }
 })
 
