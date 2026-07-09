@@ -868,6 +868,7 @@ router.get('/platform-credits', async (req, res, next) => {
 // GET /api/admin/alerts — all alerts, newest first
 router.get('/alerts', async (req, res, next) => {
   try {
+    if (!prisma.adminAlert) return res.json({ alerts: [], unreadCount: 0 })
     const alerts = await prisma.adminAlert.findMany({
       orderBy: { createdAt: 'desc' },
       take: 50,
@@ -880,6 +881,7 @@ router.get('/alerts', async (req, res, next) => {
 // PATCH /api/admin/alerts/:id/read — mark one alert read
 router.patch('/alerts/:id/read', async (req, res, next) => {
   try {
+    if (!prisma.adminAlert) return res.json({ ok: true })
     await prisma.adminAlert.update({ where: { id: req.params.id }, data: { isRead: true } })
     res.json({ ok: true })
   } catch (err) { next(err) }
@@ -888,6 +890,7 @@ router.patch('/alerts/:id/read', async (req, res, next) => {
 // POST /api/admin/alerts/mark-all-read — dismiss all unread alerts
 router.post('/alerts/mark-all-read', async (req, res, next) => {
   try {
+    if (!prisma.adminAlert) return res.json({ ok: true })
     await prisma.adminAlert.updateMany({ where: { isRead: false }, data: { isRead: true } })
     res.json({ ok: true })
   } catch (err) { next(err) }
