@@ -8,6 +8,10 @@ const VAPI_HIGH_THRESHOLD = 5   // USD monthly spend → alert
 async function checkCredits() {
   try {
     console.log('[creditMonitor] Checking platform credits...')
+    if (!prisma.adminAlert) {
+      console.log('[creditMonitor] adminAlert model not available — skipping alert checks')
+      return
+    }
     const { elevenlabs, vapi } = await getCredits(true)
 
     const todayStart = new Date()
