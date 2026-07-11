@@ -138,6 +138,12 @@ router.post('/:id/pause', requireTenantOwner, async (req, res, next) => {
       data: { status: 'PAUSED', pausedAt: new Date() }
     })
     await drainCampaignJobs(req.params.id)
+    // Reset any leads stuck in CALLING (their BullMQ jobs were just drained above).
+    // Without this, those leads stay CALLING forever — never re-queued on resume.
+    await prisma.lead.updateMany({
+      where: { campaignId: req.params.id, status: 'CALLING' },
+      data: { status: 'PENDING' }
+    })
     res.json({ message: 'Campaign paused' })
   } catch (err) { next(err) }
 })

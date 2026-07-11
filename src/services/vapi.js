@@ -197,8 +197,18 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
   console.log('[VAPI] upsertAssistant lang =', language, '| deepgramLang =', deepgramLang, '| voiceId =', resolvedVoiceId, '| firstMessage =', payload.firstMessage)
   try {
     if (existingAssistantId) {
-      const res = await vapiClient.patch(`/assistant/${existingAssistantId}`, payload)
-      return res.data.id
+      try {
+        const res = await vapiClient.patch(`/assistant/${existingAssistantId}`, payload)
+        return res.data.id
+      } catch (patchErr) {
+        // Assistant doesn't exist in this Vapi account (e.g. after account switch) — create fresh
+        if (patchErr.response?.status === 404) {
+          console.warn(`[VAPI] Assistant ${existingAssistantId} not found (404) — creating new one`)
+          const res = await vapiClient.post('/assistant', payload)
+          return res.data.id
+        }
+        throw patchErr
+      }
     } else {
       const res = await vapiClient.post('/assistant', payload)
       return res.data.id

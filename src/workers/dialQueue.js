@@ -188,22 +188,51 @@ async function runScheduler(campaignId = null) {
         console.log(`[dialQueue] Campaign "${campaign.name}" — outside hours (${dayName} ${hour}:00) and no scheduled callbacks due`)
       }
 
-      // Auto-complete: if no eligible leads remain AND no leads are still callable,
-      // mark the campaign COMPLETED so it stops showing as ACTIVE.
-      const stillCallable = await prisma.lead.count({
-        where: {
-          campaignId: campaign.id,
-          isOptedOut: false,
-          callAttempts: { lt: campaign.maxAttempts },
-          status: { in: ['PENDING', 'CALLING', 'NO_ANSWER', 'VOICEMAIL', 'CALLBACK'] }
-        }
-      })
+      const [stillCallable, needsImmediateAction] = await Promise.all([
+        // Total leads still callable (not yet exhausted)
+        prisma.lead.count({
+          where: {
+            campaignId: campaign.id,
+            isOptedOut: false,
+            callAttempts: { lt: campaign.maxAttempts },
+            status: { in: ['PENDING', 'CALLING', 'NO_ANSWER', 'VOICEMAIL', 'CALLBACK'] }
+          }
+        }),
+        // Leads needing action RIGHT NOW: in-flight, pending, or a due scheduled callback
+        prisma.lead.count({
+          where: {
+            campaignId: campaign.id,
+            isOptedOut: false,
+            callAttempts: { lt: campaign.maxAttempts },
+            OR: [
+              { status: 'CALLING' },
+              { status: 'PENDING' },
+              { status: 'CALLBACK', callbackAt: { not: null, lte: now } }
+            ]
+          }
+        })
+      ])
+
       if (stillCallable === 0) {
         await prisma.campaign.update({
           where: { id: campaign.id },
           data: { status: 'COMPLETED', completedAt: new Date() }
         })
         console.log(`[dialQueue] Campaign "${campaign.name}" — all leads exhausted, marked COMPLETED`)
+        continue
+      }
+
+      // Round complete: no in-flight/pending leads, just leads waiting for the retry window.
+      // Only auto-pause outside calling hours (end of day). Within calling hours, the
+      // campaign stays ACTIVE so the scheduler picks up leads when the retry window opens
+      // naturally — avoids a flip-flop where clicking Retry immediately re-pauses because
+      // 24h hasn't passed yet.
+      if (needsImmediateAction === 0 && !withinHours) {
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { status: 'PAUSED', pausedAt: new Date() }
+        })
+        console.log(`[dialQueue] Campaign "${campaign.name}" — round complete + outside calling hours, auto-paused (${stillCallable} lead(s) awaiting retry window)`)
       }
       continue
     }
@@ -446,12 +475,12 @@ async function startWorker() {
   callWorker.on('failed', async (job, err) => {
     console.error(`[dialQueue] Job ${job?.id} failed (lead: ${job?.data?.leadId}):`, err.message)
     if (job?.data?.leadId) {
-      // Set NO_ANSWER (not PENDING) so the retryAfterHours gate applies before the
-      // scheduler picks this lead up again. Setting PENDING would cause an immediate
-      // re-queue on the next 5-min scan, bypassing the wait window entirely.
+      // Increment callAttempts and set lastCalledAt so the retryAfterHours gate applies.
+      // Without lastCalledAt, the scheduler sees null and re-queues immediately every 5 min,
+      // bypassing the 24-hour wait and causing the same lead to be called dozens of times.
       await prisma.lead.update({
         where: { id: job.data.leadId },
-        data: { status: 'NO_ANSWER' }
+        data: { status: 'NO_ANSWER', callAttempts: { increment: 1 }, lastCalledAt: new Date() }
       }).catch(() => {})
     }
   })

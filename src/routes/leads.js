@@ -201,14 +201,13 @@ router.patch('/:id/opt-out', requireTenantOwner, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// DELETE /api/leads/:id — kept for backwards compatibility, same behaviour as PATCH opt-out
+// DELETE /api/leads/:id — permanently remove lead from database
 router.delete('/:id', requireTenantOwner, async (req, res, next) => {
   try {
-    await prisma.lead.update({
+    await prisma.lead.delete({
       where: { id: req.params.id, tenantId: req.tenant.id },
-      data: { status: 'OPTED_OUT', isOptedOut: true, optedOutAt: new Date() }
     })
-    res.json({ message: 'Lead opted out' })
+    res.json({ message: 'Lead deleted' })
   } catch (err) { next(err) }
 })
 
