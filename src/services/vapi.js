@@ -82,6 +82,16 @@ function buildGenderInstruction(language, gender) {
   return '' // English — no gendered verb forms needed
 }
 
+function buildLanguageInstruction(language) {
+  if (language === 'hi') {
+    return 'LANGUAGE RULE: You must respond ONLY in Hindi throughout the entire call. Never mix in Punjabi words or phrases. Hinglish (Hindi + occasional English technical terms) is acceptable, but Punjabi is strictly forbidden.\n\n'
+  }
+  if (language === 'pa') {
+    return 'LANGUAGE RULE: You must respond ONLY in Punjabi throughout the entire call. Never mix in Hindi words or phrases. Use natural conversational Punjabi only.\n\n'
+  }
+  return ''
+}
+
 const vapiClient = axios.create({
   baseURL: 'https://api.vapi.ai',
   headers: { Authorization: `Bearer ${process.env.VAPI_API_KEY}` }
@@ -110,6 +120,66 @@ function warnIfVoiceLanguageMismatch({ voiceId, language }) {
     )
   }
 }
+
+// ── SARVAM TTS INTEGRATION ─────────────────────────────────────────────
+// Hindi calls route to Sarvam Bulbul v3 via Vapi's custom-voice webhook
+// pattern when SARVAM_TTS_ENABLED=true. English/Punjabi are untouched.
+// Flip SARVAM_TTS_ENABLED=false to instantly revert to ElevenLabs for Hindi
+// with no code change — safe rollback at any time.
+const SARVAM_TTS_ENABLED   = process.env.SARVAM_TTS_ENABLED === 'true'
+const SARVAM_TTS_LANGUAGES = new Set(['hi', 'pa'])
+
+function shouldUseSarvam(language) {
+  return SARVAM_TTS_ENABLED && SARVAM_TTS_LANGUAGES.has(language)
+}
+
+/**
+ * Builds the voice block for a Vapi assistant payload.
+ * - Hindi (SARVAM_TTS_ENABLED=true): routes to our Sarvam custom-TTS webhook,
+ *   with ElevenLabs as automatic fallback if Sarvam errors or times out.
+ * - All other languages: unchanged ElevenLabs config.
+ */
+function buildVoiceConfig({ voiceId, language, agentGender }) {
+  if (shouldUseSarvam(language)) {
+    const gender = agentGender === 'male' ? 'male' : 'female'
+    console.log(`[VAPI] language="${language}" → routing TTS to Sarvam (gender=${gender})`)
+    return {
+      provider: 'custom-voice',
+      server: {
+        // gender as query param so the webhook picks the right Sarvam speaker
+        // without a DB lookup on every TTS chunk
+        url: `${process.env.BASE_URL}/api/tts/sarvam-hindi?gender=${gender}&language=${language}`,
+        secret: process.env.VAPI_CUSTOM_TTS_SECRET || process.env.VAPI_WEBHOOK_SECRET,
+        timeoutSeconds: 20,
+      },
+      fallbackPlan: {
+        voices: [
+          {
+            provider: '11labs',
+            voiceId: process.env.ELEVENLABS_HINDI_VOICE_ID || process.env.ELEVENLABS_DEFAULT_VOICE_ID,
+            model: 'eleven_flash_v2_5',
+          },
+        ],
+      },
+    }
+  }
+
+  // Non-Hindi path — ElevenLabs, unchanged from before.
+  warnIfVoiceLanguageMismatch({ voiceId, language })
+  return {
+    provider: '11labs',
+    voiceId,
+    model: 'eleven_flash_v2_5',
+    stability: 0.5,
+    similarityBoost: 0.75,
+    useSpeakerBoost: true,
+    optimizeStreamingLatency: 4,
+    ...(process.env.VAPI_ELEVENLABS_CREDENTIAL_ID
+      ? { credentialId: process.env.VAPI_ELEVENLABS_CREDENTIAL_ID }
+      : {}),
+  }
+}
+// ───────────────────────────────────────────────────────────────────────
 
 /**
  * Create or update a Vapi assistant for a given script.
@@ -150,30 +220,21 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     ? voiceId
     : process.env.ELEVENLABS_DEFAULT_VOICE_ID
 
-  // FIX BUG-E: surface the mismatch instead of discovering it on a live call
-  warnIfVoiceLanguageMismatch({ voiceId: resolvedVoiceId, language })
-
-  const genderInstruction = buildGenderInstruction(language, agentGender)
+  const genderInstruction   = buildGenderInstruction(language, agentGender)
+  const languageInstruction = buildLanguageInstruction(language)
 
   const payload = {
     name,
     model: {
       provider: 'openai',
       model: 'gpt-4o-mini',
-      systemPrompt: genderInstruction + (systemPrompt || ''),
+      systemPrompt: genderInstruction + languageInstruction + (systemPrompt || ''),
       tools: getVapiFunctions(),
       temperature: 0.6,
       maxTokens: 150,
     },
-    voice: {
-      provider: '11labs',
-      voiceId: resolvedVoiceId,
-      model: 'eleven_flash_v2_5',
-      stability: 0.5,
-      similarityBoost: 0.75,
-      useSpeakerBoost: true,
-      optimizeStreamingLatency: 4,
-    },
+    // Hindi → Sarvam (when SARVAM_TTS_ENABLED=true), everything else → ElevenLabs.
+    voice: buildVoiceConfig({ voiceId: resolvedVoiceId, language, agentGender }),
     transcriber: {
       provider: 'deepgram',
       model: 'nova-3',
@@ -235,10 +296,12 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
     }
   }
 
-  if (voiceOverrideId) {
-    // FIX BUG-E: same mismatch check applies to per-call voice overrides
+  if (shouldUseSarvam(language)) {
+    // Hindi always routes to Sarvam regardless of any ElevenLabs voiceOverrideId —
+    // an English voice override is meaningless for a Hindi call.
+    assistantOverrides.voice = buildVoiceConfig({ voiceId: voiceOverrideId, language, agentGender })
+  } else if (voiceOverrideId) {
     warnIfVoiceLanguageMismatch({ voiceId: voiceOverrideId, language })
-
     assistantOverrides.voice = {
       provider: '11labs',
       voiceId: voiceOverrideId,
@@ -250,8 +313,9 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
   }
 
   if (systemPromptOverride) {
-    const genderInstruction = buildGenderInstruction(language, agentGender)
-    assistantOverrides.model = { provider: 'openai', model: 'gpt-4o-mini', systemPrompt: genderInstruction + systemPromptOverride }
+    const genderInstruction   = buildGenderInstruction(language, agentGender)
+    const languageInstruction = buildLanguageInstruction(language)
+    assistantOverrides.model = { provider: 'openai', model: 'gpt-4o-mini', systemPrompt: genderInstruction + languageInstruction + systemPromptOverride }
   }
 
   const payload = {
