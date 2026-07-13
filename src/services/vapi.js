@@ -121,37 +121,65 @@ function warnIfVoiceLanguageMismatch({ voiceId, language }) {
   }
 }
 
-// ── SARVAM TTS INTEGRATION ─────────────────────────────────────────────
-// Hindi calls route to Sarvam Bulbul v3 via Vapi's custom-voice webhook
-// pattern when SARVAM_TTS_ENABLED=true. English/Punjabi are untouched.
-// Flip SARVAM_TTS_ENABLED=false to instantly revert to ElevenLabs for Hindi
-// with no code change — safe rollback at any time.
-const SARVAM_TTS_ENABLED   = process.env.SARVAM_TTS_ENABLED === 'true'
-const SARVAM_TTS_LANGUAGES = new Set(['hi', 'pa'])
+// ── CARTESIA TTS INTEGRATION ───────────────────────────────────────────
+// Hindi/Punjabi calls route to Cartesia Sonic (sonic-3.5 by default) via
+// Vapi's NATIVE cartesia provider when CARTESIA_TTS_ENABLED=true. Unlike
+// the old Sarvam integration, this is NOT a custom-voice webhook bridge —
+// Cartesia is a first-class Vapi voice provider, so Vapi talks to it
+// directly over its own low-latency streaming connection. No extra hop,
+// no webhook to host, no timeoutSeconds/fallback-on-500 plumbing needed
+// on our side beyond the standard Vapi fallbackPlan.
+//
+// Flip CARTESIA_TTS_ENABLED=false to instantly revert to ElevenLabs for
+// Hindi/Punjabi with no code change — safe rollback at any time.
+//
+// Prereq: the Cartesia API key must be added once under Vapi Dashboard →
+// Provider Keys (or passed as credentialId below) before this works —
+// Vapi needs its own credential to call Cartesia on our behalf.
+const CARTESIA_TTS_ENABLED   = process.env.CARTESIA_TTS_ENABLED === 'true'
+const CARTESIA_TTS_LANGUAGES = new Set(['hi', 'pa'])
+const CARTESIA_MODEL         = process.env.CARTESIA_MODEL || 'sonic-3.5'
 
-function shouldUseSarvam(language) {
-  return SARVAM_TTS_ENABLED && SARVAM_TTS_LANGUAGES.has(language)
+function shouldUseCartesia(language) {
+  return CARTESIA_TTS_ENABLED && CARTESIA_TTS_LANGUAGES.has(language)
+}
+
+// Per-language, per-gender Cartesia voice IDs — set these in .env after
+// picking voices from Cartesia's Voice Library (play.cartesia.ai) for
+// Hindi and Punjabi specifically.
+function resolveCartesiaVoiceId(language, gender) {
+  const g = gender === 'male' ? 'MALE' : 'FEMALE'
+  const key = `CARTESIA_${(language || 'hi').toUpperCase()}_VOICE_${g}`
+  return process.env[key] || process.env.CARTESIA_DEFAULT_VOICE_ID
 }
 
 /**
  * Builds the voice block for a Vapi assistant payload.
- * - Hindi (SARVAM_TTS_ENABLED=true): routes to our Sarvam custom-TTS webhook,
- *   with ElevenLabs as automatic fallback if Sarvam errors or times out.
+ * - Hindi/Punjabi (CARTESIA_TTS_ENABLED=true): routes to Cartesia Sonic,
+ *   Vapi's native low-latency provider, with ElevenLabs as automatic
+ *   fallback if Cartesia errors or times out.
  * - All other languages: unchanged ElevenLabs config.
  */
 function buildVoiceConfig({ voiceId, language, agentGender }) {
-  if (shouldUseSarvam(language)) {
+  if (shouldUseCartesia(language)) {
     const gender = agentGender === 'male' ? 'male' : 'female'
-    console.log(`[VAPI] language="${language}" → routing TTS to Sarvam (gender=${gender})`)
+    const cartesiaVoiceId = resolveCartesiaVoiceId(language, gender)
+    console.log(`[VAPI] language="${language}" → routing TTS to Cartesia ${CARTESIA_MODEL} (gender=${gender})`)
+    if (!cartesiaVoiceId) {
+      console.warn(
+        `[VAPI] ⚠️  WARNING: CARTESIA_TTS_ENABLED=true but no voiceId configured for ` +
+        `language="${language}" gender="${gender}". Set CARTESIA_${language.toUpperCase()}_VOICE_${gender.toUpperCase()} ` +
+        `or CARTESIA_DEFAULT_VOICE_ID in .env, or this call will fail over to the ElevenLabs fallback every time.`
+      )
+    }
     return {
-      provider: 'custom-voice',
-      server: {
-        // gender as query param so the webhook picks the right Sarvam speaker
-        // without a DB lookup on every TTS chunk
-        url: `${process.env.BASE_URL}/api/tts/sarvam-hindi?gender=${gender}&language=${language}`,
-        secret: process.env.VAPI_CUSTOM_TTS_SECRET || process.env.VAPI_WEBHOOK_SECRET,
-        timeoutSeconds: 20,
-      },
+      provider: 'cartesia',
+      model: CARTESIA_MODEL,
+      voiceId: cartesiaVoiceId,
+      language, // 'hi' or 'pa' — Cartesia's language param, improves pronunciation accuracy over auto-detect
+      ...(process.env.VAPI_CARTESIA_CREDENTIAL_ID
+        ? { credentialId: process.env.VAPI_CARTESIA_CREDENTIAL_ID }
+        : {}),
       fallbackPlan: {
         voices: [
           {
@@ -164,7 +192,7 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
     }
   }
 
-  // Non-Hindi path — ElevenLabs, unchanged from before.
+  // Non-Hindi/Punjabi path — ElevenLabs, unchanged from before.
   warnIfVoiceLanguageMismatch({ voiceId, language })
   return {
     provider: '11labs',
@@ -184,7 +212,7 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
 /**
  * Create or update a Vapi assistant for a given script.
  */
-async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, agentGender, existingAssistantId, maxCallDuration }) {
+async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, agentGender, existingAssistantId, maxCallDuration, callType }) {
 
   const deepgramLang = DEEPGRAM_LANG[language || 'en'] || 'en-US'
   const transcriberExtra = {}
@@ -229,11 +257,11 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       provider: 'openai',
       model: 'gpt-4o-mini',
       systemPrompt: genderInstruction + languageInstruction + (systemPrompt || ''),
-      tools: getVapiFunctions(),
+      tools: getVapiFunctions(callType),
       temperature: 0.6,
       maxTokens: 150,
     },
-    // Hindi → Sarvam (when SARVAM_TTS_ENABLED=true), everything else → ElevenLabs.
+    // Hindi/Punjabi → Cartesia (when CARTESIA_TTS_ENABLED=true), everything else → ElevenLabs.
     voice: buildVoiceConfig({ voiceId: resolvedVoiceId, language, agentGender }),
     transcriber: {
       provider: 'deepgram',
@@ -296,9 +324,9 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
     }
   }
 
-  if (shouldUseSarvam(language)) {
-    // Hindi always routes to Sarvam regardless of any ElevenLabs voiceOverrideId —
-    // an English voice override is meaningless for a Hindi call.
+  if (shouldUseCartesia(language)) {
+    // Hindi/Punjabi always route to Cartesia regardless of any ElevenLabs voiceOverrideId —
+    // an English voice override is meaningless for a Hindi/Punjabi call.
     assistantOverrides.voice = buildVoiceConfig({ voiceId: voiceOverrideId, language, agentGender })
   } else if (voiceOverrideId) {
     warnIfVoiceLanguageMismatch({ voiceId: voiceOverrideId, language })

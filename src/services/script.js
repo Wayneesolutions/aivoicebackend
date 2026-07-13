@@ -69,11 +69,74 @@ NUMBERS (critical — TTS reads raw digits incorrectly):
   pl: `LANGUAGE: Speak natural Polish. English tech terms are fine.`,
 }
 
+// ── SURVEY / POLLING MODE ───────────────────────────────────────────────
+// Used when script.callType === 'survey' — for election polling, voter
+// feedback, market research, and other neutral data-collection calls.
+// This is a DIFFERENT mode from the default sales prompt below: no
+// objections, no booking, no persuasion — strictly neutral Q&A.
+const SURVEY_STYLE = {
+  hi: `LANGUAGE & TONE: Speak natural, everyday Indian Hindi and Hinglish — like a professional research representative, not a news anchor or textbook.
+Do NOT use overly formal, literary, or pure/Sanskritized Hindi. Mix in common English words the way people actually speak.
+- Say "question" instead of "प्रश्न"
+- Say "answer" instead of "उत्तर"
+- Say "data" instead of "आंकड़े" when natural
+- Say "survey" instead of formal Hindi alternatives
+- Say "feedback" instead of overly formal Hindi words
+- Say "area" instead of "क्षेत्र" when natural
+Match the person's own style — if they speak Hinglish, reply in Hinglish.`,
+
+  pa: `LANGUAGE & TONE: Speak natural conversational Punjabi mixed with commonly used Hindi and English words — like a professional research representative, not formal or literary.
+Match the person's own style — if they speak Punjabi-English, reply in Punjabi-English.`,
+}
+
+const SURVEY_BASE_RULES = `You are __AGENT_NAME__, conducting a neutral survey call right now with {{prospect_name}}.
+This is polling / data research — NOT a sales call. You are not trying to persuade, convince, or sell anything.
+
+CRITICAL NEUTRALITY RULES (never break these):
+- Do NOT influence, persuade, or guide the person's opinion in any way — political, personal, or otherwise.
+- Do NOT react with approval or disapproval to any answer they give. Stay neutral no matter what they say.
+- Never suggest what the "right" or "expected" answer might be.
+- Maintain a neutral, professional, courteous tone throughout, like a research representative conducting election polling, surveys, voter feedback collection, or data research.
+
+CONVERSATION RULES:
+- Ask ONE question at a time. Wait for the person to fully finish their response before moving to the next question.
+- Keep responses short, clear, and conversational — 1–2 sentences max between questions.
+- Always acknowledge their answer briefly and neutrally ("Got it, thank you." / "Okay, noted.") before asking the next question — never comment on the content of the answer itself.
+- If they ask "Are you AI?": answer honestly and briefly, then continue with the survey.
+- If they decline to answer a question, thank them and move to the next one — never pressure them to answer.
+- If they want to stop the survey entirely, thank them for their time and use end_call with reason REFUSED.
+- Use record_response after each answered question to log it, then continue to the next question.
+- Use end_call when all questions are done (COMPLETED), the person refuses to continue (REFUSED), it's a wrong number (WRONG_NUMBER), or voicemail (VOICEMAIL).`
+
+/**
+ * Builds the system prompt for a neutral survey/polling script.
+ * Separate from the default sales prompt — no objections, no booking,
+ * no persuasion language, no sentiment/buying-intent detection.
+ */
+function compileSurveySystemPrompt(script) {
+  const lang = script.language || 'en'
+  const styleRule = SURVEY_STYLE[lang] ? `${SURVEY_STYLE[lang]}\n\n` : ''
+
+  const prompt = `${styleRule}${SURVEY_BASE_RULES.replace('__AGENT_NAME__', script.agentName)}
+
+ORGANIZATION: ${script.companyInfo}
+
+SURVEY PURPOSE: ${script.goalText}
+
+QUESTIONS / TOPICS TO COVER: ${script.servicesInfo}
+${script.faqDocument ? `\nBACKGROUND / CONTEXT (for your reference only — do not read this aloud): ${script.faqDocument}` : ''}`
+    .trim()
+
+  return prompt
+}
+
 /**
  * Compiles a Script record into a lean, production-ready system prompt.
  * Target: under 450 tokens (was ~800). Every saved token = faster first word.
  */
 function compileSystemPrompt(script) {
+  if (script.callType === 'survey') return compileSurveySystemPrompt(script)
+
   const lang = script.language || 'en'
   const langRule = lang !== 'en' && LANGUAGE_STYLE[lang] ? `${LANGUAGE_STYLE[lang]}\n\n` : ''
 
@@ -113,11 +176,55 @@ RULES (follow every one):
 }
 
 /**
- * Vapi function definitions — book_meeting, request_callback, end_call, detect_sentiment
+ * Vapi function definitions.
+ * - Default (sales): book_meeting, request_callback, markNotInterested, end_call, detect_sentiment
+ * - Survey mode (callType === 'survey'): record_response, end_call only —
+ *   no booking/objection tools, and NO sentiment/buying-intent detection
+ *   (that would conflict with staying neutral on a poll).
  */
-function getVapiFunctions() {
+function getVapiFunctions(callType) {
   const serverUrl    = process.env.BASE_URL + '/api/webhooks/vapi'
   const serverSecret = process.env.VAPI_WEBHOOK_SECRET
+
+  if (callType === 'survey') {
+    return [
+      {
+        type: 'function',
+        function: {
+          name: 'record_response',
+          description: 'Log the person\'s answer to the current survey question, then move to the next question.',
+          parameters: {
+            type: 'object',
+            properties: {
+              question: { type: 'string', description: 'The question that was just asked' },
+              answer:   { type: 'string', description: 'The person\'s answer, in their own words' }
+            },
+            required: ['question', 'answer']
+          }
+        },
+        server: { url: serverUrl, secret: serverSecret }
+      },
+      {
+        type: 'endCall',
+        function: {
+          name: 'end_call',
+          description: 'End the call. Use when all questions are answered, the person refuses to continue, wrong number, or voicemail.',
+          parameters: {
+            type: 'object',
+            properties: {
+              reason: {
+                type: 'string',
+                enum: ['COMPLETED', 'REFUSED', 'WRONG_NUMBER', 'VOICEMAIL']
+              },
+              summary: { type: 'string', description: 'One sentence summary of the call outcome' }
+            },
+            required: ['reason']
+          }
+        },
+        server: { url: serverUrl, secret: serverSecret }
+      }
+    ]
+  }
 
   return [
     {

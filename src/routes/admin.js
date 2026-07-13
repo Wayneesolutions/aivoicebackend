@@ -431,6 +431,7 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
       agentName: script.agentName,
       language: script.language || 'en',
       agentGender: script.agentGender || 'female',
+      callType: script.callType || 'sales',
       maxCallDuration: script.maxCallDuration || 180
     })
 
@@ -476,6 +477,7 @@ router.post('/scripts/:id/resync', async (req, res, next) => {
       agentName: script.agentName,
       language: script.language || 'en',
       agentGender: script.agentGender || 'female',
+      callType: script.callType || 'sales',
       existingAssistantId,
       maxCallDuration: script.maxCallDuration || 180
     })
@@ -518,6 +520,7 @@ router.post('/scripts/resync-all', async (req, res, next) => {
           agentName: script.agentName,
           language: script.language || 'en',
           agentGender: script.agentGender || 'female',
+      callType: script.callType || 'sales',
           existingAssistantId,
           maxCallDuration: script.maxCallDuration || 180
         })

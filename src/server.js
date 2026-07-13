@@ -61,7 +61,6 @@ app.use('/api/campaigns', require('./routes/campaigns'))
 app.use('/api/calls',     require('./routes/calls'))
 app.use('/api/scripts',   require('./routes/scripts'))
 app.use('/api/webhooks',  require('./routes/webhooks'))
-app.use('/api/tts',       require('./routes/customTts'))   // Sarvam custom-TTS webhook — Hindi calls only
 app.use('/api/billing',   require('./routes/billing'))
 app.use('/api/stripe',    require('./routes/stripe'))
 app.use('/api/public',    require('./routes/public'))
