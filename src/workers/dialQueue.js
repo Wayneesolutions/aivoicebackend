@@ -14,7 +14,8 @@
 const { Queue, Worker } = require('bullmq')
 const { PrismaClient } = require('@prisma/client')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
-const vapiService = require('../services/vapi')
+const vapiService    = require('../services/vapi')
+const scriptService  = require('../services/script')
 
 const prisma = new PrismaClient()
 
@@ -93,7 +94,7 @@ async function cleanupStaleCalls() {
   }
 }
 
-async function runScheduler(campaignId = null) {
+async function runScheduler(campaignId = null, directExec = false) {
   await cleanupStaleCalls()
   const now = new Date()
 
@@ -108,9 +109,9 @@ async function runScheduler(campaignId = null) {
   console.log(`[dialQueue] Scanning ${activeCampaigns.length} active campaign(s)`)
 
   const intervalMs = Math.floor(60_000 / CALLS_PER_MINUTE) // e.g. 30 000ms for 2/min
-  let delayIndex = 0
 
   for (const campaign of activeCampaigns) {
+    let delayIndex = 0  // reset per campaign so each campaign's first call fires immediately
     if (!campaign.script?.isActive) {
       console.log(`[dialQueue] Campaign "${campaign.name}" — script not active, skipping`)
       continue
@@ -260,7 +261,7 @@ async function runScheduler(campaignId = null) {
       })
       if (grabbed.count === 0) continue
 
-      await callQueue.add('dial', {
+      const jobData = {
         leadId:          lead.id,
         campaignId:      campaign.id,
         tenantId:        campaign.tenantId,
@@ -272,11 +273,22 @@ async function runScheduler(campaignId = null) {
         leadName:        lead.name,
         leadCompany:     lead.company || '',
         leadTitle:       lead.title   || ''
-      }, {
-        attempts: 1,      // No BullMQ auto-retry: if the job throws after vapiService.startOutboundCall
-        timeout: 45000,   // succeeds, a retry would make a second real phone call. Scheduler handles retries.
-        delay: delayIndex * intervalMs  // evenly space calls: job 0 fires now, job 1 in 30s, job 2 in 60s …
-      })
+      }
+
+      // directExec=true (triggerCampaign path): call dialLead directly for the first
+      // lead (delay 0) so Redis/BullMQ unavailability can't block the first call.
+      // Subsequent leads (with delays) still go through callQueue for rate limiting.
+      if (directExec && delayIndex === 0) {
+        dialLead({ data: jobData }).catch(err =>
+          console.error(`[dialQueue] Direct dialLead error (lead=${lead.id}):`, err.message)
+        )
+      } else {
+        await callQueue.add('dial', jobData, {
+          attempts: 1,      // No BullMQ auto-retry: if the job throws after vapiService.startOutboundCall
+          timeout: 45000,   // succeeds, a retry would make a second real phone call. Scheduler handles retries.
+          delay: delayIndex * intervalMs  // evenly space calls: job 0 fires now, job 1 in 30s, job 2 in 60s …
+        })
+      }
       delayIndex++
     }
   }
@@ -344,30 +356,34 @@ async function dialLead(job) {
     }
   })
 
-  // Fetch script language so it can be passed through to vapiService —
-  // needed so the language-aware greeting (BUG-D in vapi.js) fires correctly
-  // even when a per-call voice override (clonedVoiceId) is used.
+  // Compile system prompt + firstMessage fresh from the live script record.
+  // This means code changes to script.js take effect on the next call without
+  // re-approving — no stale Vapi snapshot ever used.
   let scriptLanguage = 'en'
-  let scriptGender = 'female'
-  let systemPromptOverride = null
+  let scriptGender   = 'female'
+  let systemPromptOverride  = null
+  let firstMessageOverride  = null
   try {
     const campaign = await prisma.campaign.findUnique({
       where: { id: campaignId },
       select: {
         timezone: true,
-        script: { select: { compiledPrompt: true, language: true, agentGender: true } }
+        script: true   // fetch full script so we can recompile fresh
       }
     })
-    scriptLanguage = campaign?.script?.language || 'en'
-    scriptGender   = campaign?.script?.agentGender || 'female'
+    const script = campaign?.script
+    scriptLanguage = script?.language   || 'en'
+    scriptGender   = script?.agentGender || 'female'
 
-    const meta = JSON.parse(campaign?.script?.compiledPrompt || '{}')
-    const basePrompt = meta.prompt || ''
+    // Always build firstMessage fresh — picks up callerOrg, agentName, gender, language changes
+    if (script?.callType === 'survey') {
+      firstMessageOverride = scriptService.buildSurveyFirstMessage(script)
+    }
+
+    // Compile system prompt fresh from current script.js templates
+    const basePrompt = script ? scriptService.compileSystemPrompt(script) : ''
 
     if (basePrompt) {
-      // Inject today's date in the campaign's timezone so the AI generates correct
-      // future dates. Without this, GPT uses its 2024 training-cutoff as "today"
-      // and books meetings in the past.
       const campaignTz = campaign?.timezone || 'UTC'
       const todayStr = new Date().toLocaleDateString('en-US', {
         timeZone: campaignTz,
@@ -382,7 +398,6 @@ async function dialLead(job) {
             : 'unknown date'
           return `Call ${i + 1} (${date}): ${c.summary}`
         }).join('\n')
-
         const contextBlock = `PRIOR CALL HISTORY — READ BEFORE STARTING\nYou have called this person before:\n${historyLines}\nOpen by acknowledging you've spoken: "We spoke previously — just wanted to follow up."\nReference what was discussed. Don't repeat the same pitch.\n\n`
         systemPromptOverride = dateBlock + contextBlock + basePrompt
         console.log(`[dialQueue] Lead ${leadId} — injecting date (${todayStr}) + ${priorCalls.length} prior call(s) into prompt`)
@@ -392,7 +407,7 @@ async function dialLead(job) {
       }
     }
   } catch (err) {
-    console.error(`[dialQueue] Could not build call history / fetch script language for lead ${leadId}:`, err.message)
+    console.error(`[dialQueue] Could not compile prompt for lead ${leadId}:`, err.message)
   }
 
   let vapiCall
@@ -401,6 +416,7 @@ async function dialLead(job) {
       toNumber, vapiNumberId, vapiAssistantId,
       voiceOverrideId: clonedVoiceId || undefined,
       systemPromptOverride,
+      firstMessageOverride,
       language: scriptLanguage,
       agentGender: scriptGender,
       metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
@@ -457,8 +473,16 @@ async function startWorker() {
   // where the server was restarted without Vapi sending end-of-call-report webhooks
   await cleanupStaleCalls().catch(err => console.error('[dialQueue] Startup cleanup failed:', err.message))
 
+  // Remove ALL existing repeatable jobs from Redis before adding the new one.
+  // Without this, changing the interval in code has no effect — the old job (e.g. 5-min)
+  // stays in Redis and keeps firing alongside the new one.
+  const existingRepeatables = await schedulerQueue.getRepeatableJobs().catch(() => [])
+  for (const job of existingRepeatables) {
+    await schedulerQueue.removeRepeatableByKey(job.key).catch(() => {})
+  }
+
   await schedulerQueue.add('scan-campaigns', {}, {
-    repeat: { every: 5 * 60 * 1000 },
+    repeat: { every: 60 * 1000 },
     jobId: 'recurring-scan'
   })
 
@@ -489,13 +513,14 @@ async function startWorker() {
   schedulerWorker.on('error', (err) => { if (!_swErrLogged) { console.error('[dialQueue/schedulerWorker] Redis unavailable:', err.message); _swErrLogged = true } })
   callWorker.on('error',      (err) => { if (!_cwErrLogged) { console.error('[dialQueue/callWorker] Redis unavailable:',      err.message); _cwErrLogged = true } })
 
-  console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, rate: ${CALLS_PER_MINUTE}/min (${Math.floor(60_000 / CALLS_PER_MINUTE / 1000)}s spacing), scheduler: every 5min`)
+  console.log(`[dialQueue] Workers started — concurrency: ${MAX_CONCURRENT}, rate: ${CALLS_PER_MINUTE}/min (${Math.floor(60_000 / CALLS_PER_MINUTE / 1000)}s spacing), scheduler: every 1min`)
 }
 
 async function triggerCampaign(campaignId) {
-  await schedulerQueue.add('scan-campaigns', { campaignId }, {
-    jobId: `trigger-${campaignId}-${Date.now()}`
-  })
+  // directExec=true: first lead fires via dialLead() directly, no Redis dependency.
+  runScheduler(campaignId, true).catch(err =>
+    console.error(`[dialQueue] triggerCampaign error (campaign=${campaignId}):`, err.message)
+  )
 }
 
 async function stopWorker() {

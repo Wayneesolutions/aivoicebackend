@@ -531,6 +531,10 @@ async function handleToolCalls(event) {
           })
         }
         result = 'Marked as not interested'
+      } else if (name === 'record_response') {
+        // Respond instantly — the LLM resumes in < 20ms with no filler pause.
+        // Survey Q&A is fully captured in the Vapi call transcript.
+        result = 'Logged'
       } else if (name === 'detect_sentiment') {
         // Store mid-call sentiment entry so the live dashboard updates in real time
         const call       = event.call

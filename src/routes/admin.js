@@ -419,6 +419,9 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
     // Compile the system prompt from the client's plain-English script
     const compiledPrompt = scriptService.compileSystemPrompt(script)
 
+    console.log('[approve] scriptId=', script.id, '| callType=', script.callType, '| callerOrg=', script.callerOrg, '| language=', script.language)
+    console.log('[approve] firstMessage=', script.callType === 'survey' ? scriptService.buildSurveyFirstMessage(script) : '(sales — using default)')
+
     // Create/update assistant in Vapi with compiled prompt
     // FIX BUG-F: agentGender was never passed here, so upsertAssistant's
     // default ('female') silently overrode whatever the client actually
@@ -432,7 +435,8 @@ router.post('/scripts/:id/approve', async (req, res, next) => {
       language: script.language || 'en',
       agentGender: script.agentGender || 'female',
       callType: script.callType || 'sales',
-      maxCallDuration: script.maxCallDuration || 180
+      maxCallDuration: script.maxCallDuration || 180,
+      firstMessageOverride: script.callType === 'survey' ? scriptService.buildSurveyFirstMessage(script) : undefined
     })
 
     const updated = await prisma.script.update({
@@ -479,7 +483,8 @@ router.post('/scripts/:id/resync', async (req, res, next) => {
       agentGender: script.agentGender || 'female',
       callType: script.callType || 'sales',
       existingAssistantId,
-      maxCallDuration: script.maxCallDuration || 180
+      maxCallDuration: script.maxCallDuration || 180,
+      firstMessageOverride: script.callType === 'survey' ? scriptService.buildSurveyFirstMessage(script) : undefined
     })
 
     const updated = await prisma.script.update({
@@ -520,9 +525,10 @@ router.post('/scripts/resync-all', async (req, res, next) => {
           agentName: script.agentName,
           language: script.language || 'en',
           agentGender: script.agentGender || 'female',
-      callType: script.callType || 'sales',
+          callType: script.callType || 'sales',
           existingAssistantId,
-          maxCallDuration: script.maxCallDuration || 180
+          maxCallDuration: script.maxCallDuration || 180,
+          firstMessageOverride: script.callType === 'survey' ? scriptService.buildSurveyFirstMessage(script) : undefined
         })
 
         await prisma.script.update({

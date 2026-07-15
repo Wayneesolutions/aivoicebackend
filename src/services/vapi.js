@@ -57,6 +57,14 @@ const FIRST_MESSAGE_BY_LANG = {
   }
 }
 
+// Survey calls: just a greeting with no name — the LLM's first response
+// delivers the full intro (name + org + purpose + permission ask) in one shot.
+const SURVEY_FIRST_MESSAGE_BY_LANG = {
+  en: 'Hello!',
+  hi: 'नमस्ते!',
+  pa: 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ!'
+}
+
 function buildFirstMessage(language, agentName, gender) {
   const entry = FIRST_MESSAGE_BY_LANG[language] || FIRST_MESSAGE_BY_LANG.en
   const g = gender === 'male' ? 'male' : 'female'
@@ -212,7 +220,7 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
 /**
  * Create or update a Vapi assistant for a given script.
  */
-async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, agentGender, existingAssistantId, maxCallDuration, callType }) {
+async function upsertAssistant({ name, systemPrompt, voiceId, agentName, language, agentGender, existingAssistantId, maxCallDuration, callType, firstMessageOverride }) {
 
   const deepgramLang = DEEPGRAM_LANG[language || 'en'] || 'en-US'
   const transcriberExtra = {}
@@ -230,18 +238,18 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
         },
       }
     : {
-        waitSeconds: 0.2,
+        waitSeconds: 0.1,
         transcriptionEndpointingPlan: {
           onPunctuationSeconds:   0.1,
-          onNoPunctuationSeconds: 0.4,
-          onNumberSeconds:        0.3,
+          onNoPunctuationSeconds: 0.45,
+          onNumberSeconds:        0.2,
         },
       }
 
   const stopSpeakingPlan = {
     numWords:       0,
-    voiceSeconds:   0.2,
-    backoffSeconds: 0.4,
+    voiceSeconds:   0.4,  // 0.2 was too sensitive — phone crackle / breathing triggered it
+    backoffSeconds: 0.8,  // 0.4 was too short — AI restarted while human still speaking
   }
 
   const resolvedVoiceId = (voiceId && voiceId !== VAPI_BUILTIN_VOICE)
@@ -258,7 +266,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       model: 'gpt-4o-mini',
       systemPrompt: genderInstruction + languageInstruction + (systemPrompt || ''),
       tools: getVapiFunctions(callType),
-      temperature: 0.6,
+      temperature: 0.4,
       maxTokens: 150,
     },
     // Hindi/Punjabi → Cartesia (when CARTESIA_TTS_ENABLED=true), everything else → ElevenLabs.
@@ -267,18 +275,21 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       provider: 'deepgram',
       model: 'nova-3',
       language: deepgramLang,
-      smartFormat: true,
-      endpointing: 300,
+      // smartFormat adds punctuation — great for English but causes false early triggers
+      // for Hindi/Punjabi (onPunctuationSeconds: 0.1 fires on incorrect punctuation → AI interrupts)
+      smartFormat: isEnglish,
+      // Hindi/Punjabi speakers have longer natural mid-sentence pauses — give more buffer
+      endpointing: isEnglish ? 200 : 250,
       ...transcriberExtra,
     },
-    // FIX BUG-D: was hardcoded English. Now matches the script's language and agent gender.
-    firstMessage: buildFirstMessage(language, agentName, agentGender),
+    firstMessage: firstMessageOverride || buildFirstMessage(language, agentName, agentGender),
+    firstMessageMode: 'assistant-speaks-first',
     startSpeakingPlan,
     stopSpeakingPlan,
     recordingEnabled: true,
     silenceTimeoutSeconds: 20,
     maxDurationSeconds: maxCallDuration || 180,
-    backgroundSound: 'office',
+    backgroundDenoisingEnabled: true,  // clean the human's mic input — removed 'office' sound which confused VAD
     serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
   }
@@ -313,7 +324,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
 /**
  * Trigger an outbound call via Vapi.
  */
-async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId, systemPromptOverride, language, agentGender }) {
+async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId, systemPromptOverride, firstMessageOverride, language, agentGender }) {
   if (!vapiNumberId) throw new Error('vapiNumberId is required for outbound calls')
 
   const assistantOverrides = {
@@ -344,6 +355,10 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
     const genderInstruction   = buildGenderInstruction(language, agentGender)
     const languageInstruction = buildLanguageInstruction(language)
     assistantOverrides.model = { provider: 'openai', model: 'gpt-4o-mini', systemPrompt: genderInstruction + languageInstruction + systemPromptOverride }
+  }
+
+  if (firstMessageOverride) {
+    assistantOverrides.firstMessage = firstMessageOverride
   }
 
   const payload = {

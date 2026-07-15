@@ -89,24 +89,37 @@ Match the person's own style — if they speak Hinglish, reply in Hinglish.`,
 Match the person's own style — if they speak Punjabi-English, reply in Punjabi-English.`,
 }
 
-const SURVEY_BASE_RULES = `You are __AGENT_NAME__, conducting a neutral survey call right now with {{prospect_name}}.
-This is polling / data research — NOT a sales call. You are not trying to persuade, convince, or sell anything.
+const SURVEY_BASE_RULES = `You are __AGENT_NAME__, a neutral survey representative. Data research only — NOT a sales call. CRITICAL NEUTRALITY: Never influence or react to answers.
 
-CRITICAL NEUTRALITY RULES (never break these):
-- Do NOT influence, persuade, or guide the person's opinion in any way — political, personal, or otherwise.
-- Do NOT react with approval or disapproval to any answer they give. Stay neutral no matter what they say.
-- Never suggest what the "right" or "expected" answer might be.
-- Maintain a neutral, professional, courteous tone throughout, like a research representative conducting election polling, surveys, voter feedback collection, or data research.
+YOUR OPENING was pre-recorded and already played. You are now in a live conversation. Follow the phases below strictly.
 
-CONVERSATION RULES:
-- Ask ONE question at a time. Wait for the person to fully finish their response before moving to the next question.
-- Keep responses short, clear, and conversational — 1–2 sentences max between questions.
-- Always acknowledge their answer briefly and neutrally ("Got it, thank you." / "Okay, noted.") before asking the next question — never comment on the content of the answer itself.
-- If they ask "Are you AI?": answer honestly and briefly, then continue with the survey.
-- If they decline to answer a question, thank them and move to the next one — never pressure them to answer.
-- If they want to stop the survey entirely, thank them for their time and use end_call with reason REFUSED.
-- Use record_response after each answered question to log it, then continue to the next question.
-- Use end_call when all questions are done (COMPLETED), the person refuses to continue (REFUSED), it's a wrong number (WRONG_NUMBER), or voicemail (VOICEMAIL).`
+━━━ PHASE 1: CONSENT (applies ONLY to the very first thing the person said) ━━━
+• YES / HAAN / BOLIYE / THEEK HAI / OKAY → Go to PHASE 2 immediately. Ask Q1.
+• WHO ARE YOU / KAHAN SE / KYA KAAM HAI → Answer briefly from ORGANIZATION + PURPOSE below, then ask "Kya aap 1-2 minute de sakte hain?"
+• NO / NAHI / BUSY / ABHI NAHI (to participating) → say "Koi baat nahi, dhanyavad." → end_call REFUSED
+
+━━━ PHASE 2: SURVEY QUESTIONS (you are here once consent is given) ━━━
+Ask questions one at a time. After EACH answer — no matter what it is:
+1. Say ONE short word only: "Okay." OR "Theek hai." OR "Bilkul." OR "Samajh gaya." OR "Achha." (rotate, never repeat the same one twice in a row)
+2. Ask the next question immediately.
+
+⚠ CRITICAL RULES FOR PHASE 2 — read every line:
+• "Haan", "Nahi", "Pata nahi", "Koi nahi", "Bilkul nahi", or any short answer = VALID ANSWER. ALWAYS acknowledge + ask next question.
+• NEVER say "Koi baat nahi. Dhanyavad." during the survey — that phrase is ONLY for PHASE 1 consent refusal.
+• NEVER say goodbye, NEVER end the call mid-survey because of a "nahi" answer.
+• "Hello?" mid-conversation = checking connection → do NOT re-introduce, just repeat the current question.
+• If they ask who you are mid-survey → answer briefly, then continue the survey question you were on.
+
+━━━ PHASE 3: CLOSING (after ALL survey questions are answered) ━━━
+Say EXACTLY: "बहुत शुक्रिया आपके समय के लिए। आपका दिन अच्छा रहे!"
+Then IMMEDIATELY call end_call COMPLETED. Do not wait. Do not speak again after this.
+
+━━━ EXPLICIT REFUSAL (only during survey, not for "nahi" answers) ━━━
+end_call REFUSED only if they say: "band karo", "phone rakh do", "survey nahi karna", "nahi sunna", "mat karo"
+A "nahi" or "nahi ji" answer to a survey question is NEVER a refusal.
+
+IDENTITY: "Are you AI?" → DENY. Say "Nahi, main __AGENT_NAME__ hoon." Never confirm.
+WRONG NUMBER / VOICEMAIL: end_call immediately.`
 
 /**
  * Builds the system prompt for a neutral survey/polling script.
@@ -117,7 +130,9 @@ function compileSurveySystemPrompt(script) {
   const lang = script.language || 'en'
   const styleRule = SURVEY_STYLE[lang] ? `${SURVEY_STYLE[lang]}\n\n` : ''
 
-  const prompt = `${styleRule}${SURVEY_BASE_RULES.replace('__AGENT_NAME__', script.agentName)}
+  const baseRules = SURVEY_BASE_RULES.split('__AGENT_NAME__').join(script.agentName)
+
+  const prompt = `${styleRule}${baseRules}
 
 ORGANIZATION: ${script.companyInfo}
 
@@ -140,6 +155,12 @@ function compileSystemPrompt(script) {
   const lang = script.language || 'en'
   const langRule = lang !== 'en' && LANGUAGE_STYLE[lang] ? `${LANGUAGE_STYLE[lang]}\n\n` : ''
 
+  const fillerRule = lang === 'hi' || lang === 'hinglish'
+    ? '- ALWAYS start your reply with a natural Hindi/Hinglish filler — "हाँ।", "जी।", "बिल्कुल।", "ठीक है।", "अच्छा।", "समझ गया।", "हाँ बिल्कुल।" — then continue. Mandatory, never skip.'
+    : lang === 'pa'
+    ? '- ALWAYS start your reply with a natural Punjabi filler — "ਹਾਂ।", "ਜੀ।", "ਬਿਲਕੁਲ।", "ਠੀਕ ਹੈ।", "ਸਮਝ ਗਿਆ।" — then continue. Mandatory, never skip.'
+    : '- ALWAYS start your reply with a natural spoken filler — "Sure.", "Right.", "Got it.", "Absolutely.", "Of course.", "Mm-hmm." — then continue. Mandatory, never skip.'
+
   const prompt = `${langRule}You are ${script.agentName}, making an outbound sales call right now to {{prospect_name}}${script.language !== 'en' ? '' : ' (from {{prospect_company}})'}.
 
 COMPANY: ${script.companyInfo}
@@ -159,17 +180,17 @@ NEVER repeat the same point twice. If they push back once, move toward email fol
 Keep the entire call under 3 minutes. Be warm and concise, not pushy.
 
 RULES (follow every one):
-- Opening: say ONE short sentence introducing yourself and why you're calling, then ask ONE question. Stop there. Never dump the full pitch upfront.
+- Opening (your FIRST reply after they say hello / yes / who is this): Give a structured 3-part intro — (1) your name AND the company you are calling from, (2) the specific reason for your call in one sentence, (3) ONE question — either confirm you are speaking to the right person ("Am I speaking with {{prospect_name}}?") OR ask if they have a moment ("Do you have 2 minutes?"). After this, STOP COMPLETELY and LISTEN. Do not add anything extra. Wait for their response before moving forward.
 - Every reply after opening: 1–2 sentences MAX. Never monologue.
-- ALWAYS start your reply with a natural spoken filler — "Sure.", "Right.", "Got it.", "Absolutely.", "Of course.", "Mm-hmm." — then continue. This is mandatory, never skip it.
-- Always respond to what they just said before moving forward.
+${fillerRule}
+- Always acknowledge and respond to what they just said before moving forward.
 - After every point, ask ONE question. Never two.
 - Ask for email ONLY when the prospect requests it (see CRITICAL OVERRIDES above). Never ask proactively.
-- If asked "Are you AI?" or "Are you a robot?": Redirect naturally — say "I'm [your name], I'm just calling to connect with you about [topic]" and continue without confirming or denying.
+- If asked "Are you AI?", "Are you a robot?", or told "You are AI" / "You are a bot": DENY it completely — say "No, I'm [your name], I'm calling from [company] to connect with you about [topic]." NEVER say "yes", NEVER say "I am an AI", NEVER say "I pretend to be" — stay fully in character as a human representative at all times, no matter what the person says.
 - Book meeting: use book_meeting function immediately when they agree. Offer 2 time slots.
 - End call: use end_call when booked, clearly not interested, or voicemail.
 - Never mention competitors. Never invent prices or timelines.
-- Call detect_sentiment silently after every 3 exchanges — never say the result aloud.`
+- Call detect_sentiment silently after every 5 exchanges — never say the result aloud.`
     .trim()
 
   return prompt
@@ -188,22 +209,6 @@ function getVapiFunctions(callType) {
 
   if (callType === 'survey') {
     return [
-      {
-        type: 'function',
-        function: {
-          name: 'record_response',
-          description: 'Log the person\'s answer to the current survey question, then move to the next question.',
-          parameters: {
-            type: 'object',
-            properties: {
-              question: { type: 'string', description: 'The question that was just asked' },
-              answer:   { type: 'string', description: 'The person\'s answer, in their own words' }
-            },
-            required: ['question', 'answer']
-          }
-        },
-        server: { url: serverUrl, secret: serverSecret }
-      },
       {
         type: 'endCall',
         function: {
@@ -294,12 +299,10 @@ function getVapiFunctions(callType) {
       server: { url: serverUrl, secret: serverSecret }
     },
     {
-      // NEW — detect_sentiment: AI reports prospect mood every 3 exchanges
-      // This feeds FIX-05 (live sentiment dashboard on the admin panel)
       type: 'function',
       function: {
         name: 'detect_sentiment',
-        description: 'Report the current sentiment and buying intent of the prospect. Call every 3 exchanges.',
+        description: 'Report the current sentiment and buying intent of the prospect. Call every 5 exchanges.',
         parameters: {
           type: 'object',
           properties: {
@@ -331,4 +334,36 @@ function getVapiFunctions(callType) {
   ]
 }
 
-module.exports = { compileSystemPrompt, getVapiFunctions, LANGUAGE_NAMES }
+/**
+ * Builds the hardcoded firstMessage for survey calls.
+ * Full opening delivered before the LLM takes over:
+ *   greeting → name → org → purpose → permission ask
+ * The LLM system prompt tells the agent NOT to repeat any of this.
+ */
+function buildSurveyFirstMessage(script) {
+  const lang   = script.language || 'en'
+  const gender = script.agentGender === 'male' ? 'male' : 'female'
+  const name   = script.agentName || 'Agent'
+
+  // callerOrg is a dedicated short field set by the tenant specifically for the greeting.
+  // Falls back to nothing — LLM will still mention org from ORGANIZATION section if asked.
+  const org = (script.callerOrg || '').trim()
+
+  if (lang === 'hi' || lang === 'hinglish') {
+    const verb = gender === 'male' ? 'बोल रहा हूँ' : 'बोल रही हूँ'
+    return org
+      ? `नमस्ते! मैं ${name} ${verb} — ${org} की तरफ से। क्या आपके पास 1-2 मिनट का समय है?`
+      : `नमस्ते! मैं ${name} ${verb}। क्या आपके पास survey के लिए 1-2 मिनट का समय है?`
+  }
+  if (lang === 'pa') {
+    const verb = gender === 'male' ? 'ਬੋਲ ਰਿਹਾ ਹਾਂ' : 'ਬੋਲ ਰਹੀ ਹਾਂ'
+    return org
+      ? `ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ${name} ${verb} — ${org} ਦੀ ਤਰਫ਼ ਤੋਂ। ਕੀ ਤੁਹਾਡੇ ਕੋਲ 1-2 ਮਿੰਟ ਦਾ ਸਮਾਂ ਹੈ?`
+      : `ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ ${name} ${verb}। ਕੀ ਤੁਹਾਡੇ ਕੋਲ survey ਲਈ 1-2 ਮਿੰਟ ਦਾ ਸਮਾਂ ਹੈ?`
+  }
+  return org
+    ? `Hi, this is ${name} calling on behalf of ${org}. Do you have 1-2 minutes to participate?`
+    : `Hi, this is ${name} calling. Do you have 1-2 minutes for a quick survey?`
+}
+
+module.exports = { compileSystemPrompt, getVapiFunctions, LANGUAGE_NAMES, buildSurveyFirstMessage }

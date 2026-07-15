@@ -46,7 +46,7 @@ router.get('/', requireTenantUser, async (req, res, next) => {
 // POST /api/scripts — client submits new script for approval
 router.post('/', requireTenantOwner, async (req, res, next) => {
   try {
-    const { name, companyInfo, servicesInfo, goalText, objections, agentName, voiceId, language, agentGender, maxCallDuration, callType } = req.body
+    const { name, companyInfo, servicesInfo, goalText, objections, agentName, voiceId, language, agentGender, maxCallDuration, callType, callerOrg } = req.body
     if (!companyInfo || !servicesInfo || !goalText)
       return res.status(400).json({ error: 'companyInfo, servicesInfo, and goalText required' })
 
@@ -56,6 +56,7 @@ router.post('/', requireTenantOwner, async (req, res, next) => {
         name:        name || 'New script',
         companyInfo, servicesInfo, goalText,
         objections:  objections || null,
+        callerOrg:   callerOrg  || null,
         agentName:   agentName  || 'Alex',
         voiceId:     voiceId    || process.env.ELEVENLABS_DEFAULT_VOICE_ID,
         language:    language   || 'en',
@@ -76,7 +77,7 @@ router.patch('/:id', requireTenantOwner, async (req, res, next) => {
     if (!script) return res.status(404).json({ error: 'Script not found' })
     if (script.status === 'LIVE') return res.status(400).json({ error: 'Cannot edit a LIVE script. Pause the campaign first.' })
 
-    const { name, agentName, agentGender, companyInfo, servicesInfo, goalText, objections, voiceId, language, maxCallDuration, callType } = req.body
+    const { name, agentName, agentGender, companyInfo, servicesInfo, goalText, objections, voiceId, language, maxCallDuration, callType, callerOrg } = req.body
     const updated = await prisma.script.update({
       where: { id: req.params.id },
       data: {
@@ -87,6 +88,7 @@ router.patch('/:id', requireTenantOwner, async (req, res, next) => {
         ...(servicesInfo     !== undefined && { servicesInfo }),
         ...(goalText         !== undefined && { goalText }),
         ...(objections       !== undefined && { objections: objections || null }),
+        ...(callerOrg        !== undefined && { callerOrg: callerOrg || null }),
         ...(voiceId          !== undefined && { voiceId: voiceId || null }),
         ...(language         !== undefined && { language }),
         ...(callType         !== undefined && { callType: callType === 'survey' ? 'survey' : 'sales' }),
