@@ -224,7 +224,7 @@ async function handleCallEnded(event) {
 
   console.log(`[webhook] handleCallEnded — vapiId=${call.id} endedReason=${endedReason} duration=${durationSeconds}s source:${durationSource}`)
 
-  const mappedOutcome = mapVapiEndReason(endedReason) || 'NO_ANSWER'
+  const mappedOutcome = mapVapiEndReason(endedReason, durationSeconds) || 'NO_ANSWER'
   // Prefer outcome already written by AI tool-calls during the call.
   // meetingBookedAt is the authoritative booking signal; callRecord.outcome
   // may already be CALLBACK or NOT_INTERESTED from scheduleCallback / markNotInterested.
@@ -631,6 +631,7 @@ async function handleFunctionCall(event) {
 
 // Tier 1: Explicit DNC requests — unambiguous "remove me / stop calling" language
 const OPT_OUT_PHRASES = [
+  // English
   'remove me from your call list',
   'remove me from the call list',
   'remove me from your calling list',
@@ -647,6 +648,27 @@ const OPT_OUT_PHRASES = [
   'add me to your do not call',
   'put me on your do not call',
   'opt me out',
+
+  // Hindi — Devanagari script
+  'मेरा नंबर हटा दो',
+  'मेरा नंबर हटाओ',
+  'मुझे list से हटाओ',
+  'मुझे हटा दो',
+  'मेरा नंबर remove करो',
+  'मेरा नंबर remove कर दो',
+  'list से निकाल दो',
+  'मेरा नंबर delete कर दो',
+
+  // Hinglish — transliterated (common in transcripts)
+  'mera number hata do',
+  'mera number hatao',
+  'mujhe list se hatao',
+  'list se mera number hatao',
+  'mera number remove kar do',
+  'remove kar do mera number',
+  'mujhe remove kar do',
+  'mera number delete kar do',
+  'list se nikal do',
 ]
 
 // Tier 2: Soft opt-out — rejection combined with a clear "don't call back / don't contact"
@@ -654,7 +676,7 @@ const OPT_OUT_PHRASES = [
 // But pairing it with a permanence word ("don't call back", "ever", "anymore") makes it
 // a real suppression request that must be honoured.
 const SOFT_OPT_OUT_PHRASES = [
-  // "don't call us" variants (main list covers "me"; these cover "us" / teams / businesses)
+  // English — "don't call us" variants
   "please don't call us anymore",
   "please don't call us again",
   "please don't call again",
@@ -665,7 +687,7 @@ const SOFT_OPT_OUT_PHRASES = [
   "never call us again",
   "never call me again",
 
-  // "don't contact us"
+  // English — "don't contact us"
   "please don't contact us",
   "don't contact us again",
   "do not contact us again",
@@ -673,11 +695,11 @@ const SOFT_OPT_OUT_PHRASES = [
   "we don't want to be contacted",
   "we do not want to be contacted",
 
-  // "please stop" broader forms (without explicit "me" — already covered above)
+  // English — "please stop"
   "please stop calling",
   "please stop contacting",
 
-  // Permanence rejection: "ever / anymore / never"
+  // English — permanence rejection
   "not interested now or ever",
   "not interested, ever",
   "we will never need your services",
@@ -688,7 +710,7 @@ const SOFT_OPT_OUT_PHRASES = [
   "we don't want any calls from you",
   "we don't want to receive calls",
 
-  // Service rejection — clear "we have no need" statements
+  // English — service rejection
   "we don't need any services",
   "we don't need your services",
   "don't need any services",
@@ -697,6 +719,25 @@ const SOFT_OPT_OUT_PHRASES = [
   "not interested in any services",
   "we have no need for your services",
   "we don't require any services",
+
+  // Hindi — Devanagari script
+  'दोबारा call मत करना',
+  'दोबारा मत करना',
+  'फिर call मत करना',
+  'call मत करो',
+  'phone मत करो',
+  'दोबारा फ़ोन मत करना',
+
+  // Hinglish — transliterated
+  'dobara call mat karna',
+  'dobara call mat karo',
+  'dobara mat karna',
+  'phir call mat karna',
+  'phir mat karna',
+  'call mat karo',
+  'phone mat karo',
+  'call nahi chahiye',
+  'mujhe call nahi chahiye',
 ]
 
 function detectOptOut(transcript, summary, currentOutcome, durationSeconds) {
@@ -722,17 +763,35 @@ function detectOptOut(transcript, summary, currentOutcome, durationSeconds) {
   return currentOutcome
 }
 
-function mapVapiEndReason(reason) {
+// Minimum duration (seconds) to consider a customer-ended call a real conversation.
+// Below this threshold the customer likely picked up and immediately hung up.
+const HANGUP_CONVERSATION_MIN_SECONDS = 20
+
+function mapVapiEndReason(reason, durationSeconds = 0) {
   if (!reason) return null
   const r = reason.toLowerCase()
+
   if (r.includes('customer-did-not-answer') || r.includes('no-answer')) return 'NO_ANSWER'
-  if (r.includes('voicemail'))        return 'VOICEMAIL'
-  // customer-ended / assistant-ended = normal conversation finish.
-  // Return null so the AI's tool-call outcome (CALLBACK, NOT_INTERESTED, etc.) is preserved.
-  // Falls back to NO_ANSWER via the `|| 'NO_ANSWER'` in the caller.
-  if (r.includes('customer-ended'))   return null
-  if (r.includes('assistant-ended'))  return null
-  if (r.includes('error'))            return 'ERROR'   // was 'FAILED' — not a valid CallOutcome
+  if (r.includes('voicemail')) return 'VOICEMAIL'
+
+  if (r.includes('customer-ended')) {
+    // Two cases only — duration decides if a real conversation happened:
+    //   < 20s  → customer picked up and immediately hung up, no real exchange → retry as NO_ANSWER
+    //   ≥ 20s  → real conversation happened, customer chose to end it → COMPLETED
+    //
+    // NOT_INTERESTED is never set here — it must come from the AI explicitly calling
+    // markNotInterested / end_call(NOT_INTERESTED) after the customer verbally declined.
+    if (durationSeconds < HANGUP_CONVERSATION_MIN_SECONDS) return 'NO_ANSWER'
+    return 'COMPLETED'
+  }
+
+  // assistant-ended = AI called end_call — outcome already set by tool call, preserve it.
+  if (r.includes('assistant-ended')) return null
+  // Twilio couldn't establish the call at all — network/carrier issue, not a real no-answer.
+  if (r.includes('twilio-failed-to-connect')) return 'ERROR'
+  // AI timed out waiting for customer to speak — call connected but no conversation happened.
+  if (r.includes('silence-timed-out')) return 'NO_ANSWER'
+  if (r.includes('error'))            return 'ERROR'
   return null
 }
 

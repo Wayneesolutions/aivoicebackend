@@ -290,6 +290,19 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     silenceTimeoutSeconds: 20,
     maxDurationSeconds: maxCallDuration || 180,
     backgroundDenoisingEnabled: true,  // clean the human's mic input — removed 'office' sound which confused VAD
+    // Hang up cleanly when a voicemail box is detected instead of passing audio to the AI.
+    // Twilio AMD fires before the beep — endedReason becomes 'voicemail', our webhook maps it
+    // to VOICEMAIL outcome. Without this, the AI hears the automated greeting, gets confused,
+    // and may accidentally tag the call as CALLBACK.
+    voicemailDetection: {
+      provider: 'twilio',
+      voicemailDetectionTypes: ['machine_start', 'machine_end_beep', 'machine_end_silence', 'unknown'],
+      enabled: true,
+      machineDetectionTimeout: 30,
+      machineDetectionSpeechThreshold: 2400,
+      machineDetectionSpeechEndThreshold: 1200,
+      machineDetectionSilenceTimeout: 5000,
+    },
     serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
   }

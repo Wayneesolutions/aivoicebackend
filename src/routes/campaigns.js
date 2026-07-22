@@ -105,6 +105,15 @@ router.patch('/:id', requireTenantOwner, async (req, res, next) => {
     const allowed = ['name', 'callFromHour', 'callToHour', 'timezone', 'callDays', 'maxAttempts', 'retryAfterHours']
     const data = {}
     allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k] })
+
+    if (req.body.scriptId !== undefined) {
+      const script = await prisma.script.findFirst({ where: { id: req.body.scriptId, tenantId: req.tenant.id } })
+      if (!script) return res.status(404).json({ error: 'Script not found' })
+      if (!['APPROVED', 'LIVE'].includes(script.status))
+        return res.status(400).json({ error: 'Script must be approved before linking to a campaign' })
+      data.scriptId = req.body.scriptId
+    }
+
     const campaign = await prisma.campaign.update({
       where: { id: req.params.id, tenantId: req.tenant.id },
       data
@@ -145,6 +154,26 @@ router.post('/:id/pause', requireTenantOwner, async (req, res, next) => {
       data: { status: 'PENDING' }
     })
     res.json({ message: 'Campaign paused' })
+  } catch (err) { next(err) }
+})
+
+// GET /api/campaigns/:id/callbacks
+// Returns all CALLBACK leads for this campaign
+router.get('/:id/callbacks', requireTenantUser, async (req, res, next) => {
+  try {
+    const campaign = await prisma.campaign.findFirst({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      select: { id: true }
+    })
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
+
+    const leads = await prisma.lead.findMany({
+      where: { campaignId: campaign.id, status: 'CALLBACK' },
+      orderBy: { lastCalledAt: 'desc' },
+      select: { id: true, name: true, phone: true, company: true, callAttempts: true, lastCalledAt: true }
+    })
+
+    res.json({ leads, total: leads.length })
   } catch (err) { next(err) }
 })
 
@@ -223,12 +252,66 @@ router.post('/:id/retry-no-answers', requireTenantOwner, async (req, res, next) 
     const totalReset = retryableResult.count + exhaustedReset
 
     let queued = false
-    if (campaign.status === 'ACTIVE' && totalReset > 0) {
-      await triggerCampaign(campaign.id)
-      queued = true
+    let finalStatus = campaign.status
+
+    if (totalReset > 0) {
+      if (campaign.status === 'ACTIVE') {
+        await triggerCampaign(campaign.id)
+        queued = true
+      } else if (campaign.status === 'COMPLETED') {
+        // Re-activate so the dialer can pick up the reset leads
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { status: 'ACTIVE', startedAt: new Date() }
+        })
+        await triggerCampaign(campaign.id)
+        queued = true
+        finalStatus = 'ACTIVE'
+      }
     }
 
-    res.json({ reset: totalReset, queued, campaignStatus: campaign.status })
+    res.json({ reset: totalReset, queued, campaignStatus: finalStatus })
+  } catch (err) { next(err) }
+})
+
+// POST /api/campaigns/:id/retry-outcome
+// Resets VOICEMAIL or CALLBACK leads back to PENDING and triggers the dialer
+router.post('/:id/retry-outcome', requireTenantOwner, async (req, res, next) => {
+  try {
+    const { outcome } = req.body
+    if (!['VOICEMAIL', 'CALLBACK'].includes(outcome))
+      return res.status(400).json({ error: 'outcome must be VOICEMAIL or CALLBACK' })
+
+    const campaign = await prisma.campaign.findFirst({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      select: { id: true, status: true }
+    })
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' })
+
+    const result = await prisma.lead.updateMany({
+      where: { campaignId: campaign.id, status: outcome },
+      data: { status: 'PENDING', lastCalledAt: null }
+    })
+
+    let queued = false
+    let finalStatus = campaign.status
+
+    if (result.count > 0) {
+      if (campaign.status === 'ACTIVE') {
+        await triggerCampaign(campaign.id)
+        queued = true
+      } else if (['COMPLETED', 'PAUSED'].includes(campaign.status)) {
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { status: 'ACTIVE', startedAt: new Date() }
+        })
+        await triggerCampaign(campaign.id)
+        queued = true
+        finalStatus = 'ACTIVE'
+      }
+    }
+
+    res.json({ reset: result.count, queued, campaignStatus: finalStatus })
   } catch (err) { next(err) }
 })
 
