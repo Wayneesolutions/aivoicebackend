@@ -785,8 +785,13 @@ function mapVapiEndReason(reason, durationSeconds = 0) {
     return 'COMPLETED'  // real conversation, customer ended call after talking — survey/call finished
   }
 
-  // assistant-ended = AI called end_call — outcome already set by tool call, preserve it.
-  if (r.includes('assistant-ended')) return null
+  // assistant-ended = AI called end_call.
+  // If a tool call set outcome during the call, callRecord.outcome already holds it and this
+  // value is ignored (caller does: callRecord.outcome || mappedOutcome).
+  // If no tool set an outcome (e.g. survey script just finished), treat as COMPLETED.
+  if (r.includes('assistant-ended')) {
+    return durationSeconds >= HANGUP_CONVERSATION_MIN_SECONDS ? 'COMPLETED' : 'NO_ANSWER'
+  }
   // Twilio couldn't establish the call at all — network/carrier issue, not a real no-answer.
   if (r.includes('twilio-failed-to-connect')) return 'ERROR'
   // AI timed out waiting for customer to speak — call connected but no conversation happened.
