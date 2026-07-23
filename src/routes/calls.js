@@ -91,7 +91,7 @@ router.get('/stats', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
-// Proxy recording: fetch fresh presigned URL from Vapi API and redirect
+// Return fresh recording URL as JSON (audio elements can't send auth headers for redirects)
 router.get('/:id/recording', requireTenantUser, async (req, res, next) => {
   try {
     const call = await prisma.call.findFirst({
@@ -105,14 +105,13 @@ router.get('/:id/recording', requireTenantUser, async (req, res, next) => {
       try {
         const { data } = await vapiClient.get(`/call/${call.vapiCallId}`)
         const freshUrl = data?.artifact?.recordingUrl || data?.recordingUrl
-        if (freshUrl) return res.redirect(302, freshUrl)
+        if (freshUrl) return res.json({ url: freshUrl })
       } catch (vapiErr) {
         console.warn('[recording proxy] Vapi fetch failed, falling back to stored URL:', vapiErr.message)
       }
     }
 
-    // Fallback to stored URL
-    if (call.recordingUrl) return res.redirect(302, call.recordingUrl)
+    if (call.recordingUrl) return res.json({ url: call.recordingUrl })
     res.status(404).json({ error: 'Recording not available' })
   } catch (err) { next(err) }
 })
