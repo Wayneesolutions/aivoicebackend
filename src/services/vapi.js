@@ -287,7 +287,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     startSpeakingPlan,
     stopSpeakingPlan,
     recordingEnabled: true,
-    silenceTimeoutSeconds: 20,
+    silenceTimeoutSeconds: 30,
     maxDurationSeconds: maxCallDuration || 180,
     backgroundDenoisingEnabled: true,  // clean the human's mic input — removed 'office' sound which confused VAD
     // Hang up cleanly when a voicemail box is detected instead of passing audio to the AI.
