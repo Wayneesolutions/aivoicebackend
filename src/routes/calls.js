@@ -123,7 +123,17 @@ router.get('/:id', requireTenantUser, async (req, res, next) => {
       include: { lead: true, phoneNumber: true }
     })
     if (!call) return res.status(404).json({ error: 'Call not found' })
-    res.json(mapCall(call))
+
+    // Refresh the recording URL from Vapi so the audio player never gets a stale presigned URL
+    let freshRecordingUrl = call.recordingUrl || null
+    if (call.vapiCallId && call.recordingUrl) {
+      try {
+        const { data } = await vapiClient.get(`/call/${call.vapiCallId}`)
+        freshRecordingUrl = data?.artifact?.recordingUrl || data?.recordingUrl || freshRecordingUrl
+      } catch { /* keep stored URL as fallback */ }
+    }
+
+    res.json({ ...mapCall(call), recordingUrl: freshRecordingUrl })
   } catch (err) { next(err) }
 })
 
