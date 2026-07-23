@@ -247,9 +247,9 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       }
 
   const stopSpeakingPlan = {
-    numWords:       0,
-    voiceSeconds:   0.4,  // 0.2 was too sensitive — phone crackle / breathing triggered it
-    backoffSeconds: 0.8,  // 0.4 was too short — AI restarted while human still speaking
+    numWords:       2,    // require at least 2 words before cutting AI off — prevents noise/breathing triggering it
+    voiceSeconds:   0.6,  // raised from 0.4 — phone crackle was stopping AI mid-sentence
+    backoffSeconds: 1.0,  // raised from 0.8 — give AI time to finish its sentence before re-listening
   }
 
   const resolvedVoiceId = (voiceId && voiceId !== VAPI_BUILTIN_VOICE)
@@ -267,7 +267,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       systemPrompt: genderInstruction + languageInstruction + (systemPrompt || ''),
       tools: getVapiFunctions(callType),
       temperature: 0.4,
-      maxTokens: 150,
+      maxTokens: 250,
     },
     // Hindi/Punjabi → Cartesia (when CARTESIA_TTS_ENABLED=true), everything else → ElevenLabs.
     voice: buildVoiceConfig({ voiceId: resolvedVoiceId, language, agentGender }),
@@ -298,10 +298,10 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
       provider: 'twilio',
       voicemailDetectionTypes: ['machine_start', 'machine_end_beep', 'machine_end_silence', 'unknown'],
       enabled: true,
-      machineDetectionTimeout: 30,
+      machineDetectionTimeout: 5,      // 30s was causing up to 30s silence before AI spoke — 5s is enough
       machineDetectionSpeechThreshold: 2400,
       machineDetectionSpeechEndThreshold: 1200,
-      machineDetectionSilenceTimeout: 5000,
+      machineDetectionSilenceTimeout: 3000, // 5000ms was too long — 3s silence = human
     },
     serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
