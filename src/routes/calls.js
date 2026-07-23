@@ -2,6 +2,12 @@
 const router = require('express').Router()
 const prisma = require('../lib/prisma')
 const { requireTenantUser } = require('../middleware/auth')
+const axios = require('axios')
+
+const vapiClient = axios.create({
+  baseURL: 'https://api.vapi.ai',
+  headers: { Authorization: `Bearer ${process.env.VAPI_API_KEY}` }
+})
 
 router.get('/', requireTenantUser, async (req, res, next) => {
   try {
@@ -82,6 +88,32 @@ router.get('/stats', requireTenantUser, async (req, res, next) => {
         : 0,
       callsByDay
     })
+  } catch (err) { next(err) }
+})
+
+// Proxy recording: fetch fresh presigned URL from Vapi API and redirect
+router.get('/:id/recording', requireTenantUser, async (req, res, next) => {
+  try {
+    const call = await prisma.call.findFirst({
+      where: { id: req.params.id, tenantId: req.tenant.id },
+      select: { vapiCallId: true, recordingUrl: true }
+    })
+    if (!call) return res.status(404).json({ error: 'Call not found' })
+
+    // Try to get a fresh URL from Vapi if we have the Vapi call ID
+    if (call.vapiCallId) {
+      try {
+        const { data } = await vapiClient.get(`/call/${call.vapiCallId}`)
+        const freshUrl = data?.artifact?.recordingUrl || data?.recordingUrl
+        if (freshUrl) return res.redirect(302, freshUrl)
+      } catch (vapiErr) {
+        console.warn('[recording proxy] Vapi fetch failed, falling back to stored URL:', vapiErr.message)
+      }
+    }
+
+    // Fallback to stored URL
+    if (call.recordingUrl) return res.redirect(302, call.recordingUrl)
+    res.status(404).json({ error: 'Recording not available' })
   } catch (err) { next(err) }
 })
 
