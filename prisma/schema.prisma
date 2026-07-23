@@ -377,6 +377,7 @@ enum CallOutcome {
   WRONG_NUMBER
   OPTED_OUT
   ERROR
+  COMPLETED
 }
 
 // ─────────────────────────────────────────────

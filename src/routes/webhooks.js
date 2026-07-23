@@ -782,7 +782,7 @@ function mapVapiEndReason(reason, durationSeconds = 0) {
     // NOT_INTERESTED is never set here — it must come from the AI explicitly calling
     // markNotInterested / end_call(NOT_INTERESTED) after the customer verbally declined.
     if (durationSeconds < HANGUP_CONVERSATION_MIN_SECONDS) return 'NO_ANSWER'
-    return null  // real conversation — let AI tool-call outcome take precedence; fallback to NO_ANSWER
+    return 'COMPLETED'  // real conversation, customer ended call after talking — survey/call finished
   }
 
   // assistant-ended = AI called end_call — outcome already set by tool call, preserve it.
