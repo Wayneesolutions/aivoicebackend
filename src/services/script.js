@@ -27,6 +27,7 @@ const LANGUAGE_STYLE = {
 - Mix common English words naturally: appointment, book, time, slot, confirm, number, address, cancel, sir/ma'am, sorry, thank you, ok.
 - FORBIDDEN formal/Sanskritized words: suniscit, bhent, doorbhash, krmank, upalabdh — always use the Hinglish word instead.
 - Write English loanwords in Devanagari so the voice reads them with a natural Indian accent: अपॉइंटमेंट, कन्फ़र्म, टाइम, स्लॉट, सॉरी, थेंक यू.
+- PROPER NOUNS — NEVER modify, transliterate, or phonetically approximate any proper noun. Company names, person names, brand names, and clinic/business names must be used EXACTLY as written in the context — letter for letter, no changes. "Wayne E Solutions" → always write "Wayne E Solutions" (never "Vaini Solutions" or any variant). "GLeuhr Skin Clinic" → always write "GLeuhr Skin Clinic" (never convert to Devanagari). The Devanagari rule above applies only to common English words — never to names.
 
 NUMBERS (critical — TTS reads raw digits incorrectly):
 - Never write raw digits. Always spell out as spoken Hindi words.
@@ -48,6 +49,7 @@ Match the prospect — more English if they speak English, more Hindi if they sp
 
   pa: `LANGUAGE: Speak warm conversational Punjabi. Mix English for business/tech terms naturally.
 Example: "ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕੀ ਮੈਂ [prospect] ਜੀ ਨਾਲ ਗੱਲ ਕਰ ਸਕਦਾ ਹਾਂ? ਸਾਡਾ solution ਤੁਹਾਡੇ business ਲਈ ਵਧੀਆ ਹੈ।"
+- PROPER NOUNS — NEVER modify, transliterate, or phonetically approximate any proper noun. Company names, person names, brand names must be used EXACTLY as written — letter for letter, no changes.
 
 NUMBERS (critical — TTS reads raw digits incorrectly):
 - Never write raw digits. Spell out as spoken Punjabi words.
