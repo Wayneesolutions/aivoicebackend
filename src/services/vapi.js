@@ -294,14 +294,22 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     // Twilio AMD fires before the beep — endedReason becomes 'voicemail', our webhook maps it
     // to VOICEMAIL outcome. Without this, the AI hears the automated greeting, gets confused,
     // and may accidentally tag the call as CALLBACK.
+    //
+    // IMPORTANT: 'machine_start' and 'unknown' are intentionally excluded:
+    // - 'machine_start' fires when speech begins immediately — our AI speaks first
+    //   (firstMessageMode: assistant-speaks-first), so AMD hears instant speech and
+    //   classifies it as machine_start, hanging up on real humans. Only end call on
+    //   definitive signals (machine_end_beep / machine_end_silence = voicemail finished).
+    // - 'unknown' fires when AMD times out without a result — a timeout is ambiguous,
+    //   not a confirmed voicemail. Hanging up on 'unknown' drops real answered calls.
     voicemailDetection: {
       provider: 'twilio',
-      voicemailDetectionTypes: ['machine_start', 'machine_end_beep', 'machine_end_silence', 'unknown'],
+      voicemailDetectionTypes: ['machine_end_beep', 'machine_end_silence'],
       enabled: true,
-      machineDetectionTimeout: 5,      // 30s was causing up to 30s silence before AI spoke — 5s is enough
+      machineDetectionTimeout: 12,     // 5s was causing AMD to time out on real answered calls → 'unknown' → false hangup
       machineDetectionSpeechThreshold: 2400,
       machineDetectionSpeechEndThreshold: 1200,
-      machineDetectionSilenceTimeout: 3000, // 5000ms was too long — 3s silence = human
+      machineDetectionSilenceTimeout: 3000,
     },
     serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
     serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
