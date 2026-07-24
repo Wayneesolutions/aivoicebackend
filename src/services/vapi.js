@@ -200,7 +200,8 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
     }
   }
 
-  // Non-Hindi/Punjabi path — ElevenLabs, unchanged from before.
+  // Non-Hindi/Punjabi path — ElevenLabs.
+  // Note: optimizeStreamingLatency was removed from ElevenLabs v3 API — Vapi rejects it with 400.
   warnIfVoiceLanguageMismatch({ voiceId, language })
   return {
     provider: '11labs',
@@ -209,7 +210,6 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
     stability: 0.5,
     similarityBoost: 0.75,
     useSpeakerBoost: true,
-    optimizeStreamingLatency: 4,
     ...(process.env.VAPI_ELEVENLABS_CREDENTIAL_ID
       ? { credentialId: process.env.VAPI_ELEVENLABS_CREDENTIAL_ID }
       : {}),
@@ -328,7 +328,12 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     }
   } catch (err) {
     if (err.response) {
-      console.error('[VAPI ERROR]', err.response.status, JSON.stringify(err.response.data, null, 2))
+      const detail = err.response.data
+      console.error('[VAPI ERROR]', err.response.status, JSON.stringify(detail, null, 2))
+      const vapiMsg = typeof detail === 'string' ? detail : (detail?.message || JSON.stringify(detail))
+      const wrapped = new Error(`Vapi ${err.response.status}: ${vapiMsg}`)
+      wrapped.status = err.response.status
+      throw wrapped
     }
     throw err
   }
