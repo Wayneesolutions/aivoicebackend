@@ -248,7 +248,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
 
   const stopSpeakingPlan = {
     numWords:       2,    // require at least 2 words before cutting AI off — prevents noise/breathing triggering it
-    voiceSeconds:   0.6,  // raised from 0.4 — phone crackle was stopping AI mid-sentence
+    voiceSeconds:   0.5,  // Vapi cap is 0.5 max; was 0.6 which caused 400
     backoffSeconds: 1.0,  // raised from 0.8 — give AI time to finish its sentence before re-listening
   }
 
