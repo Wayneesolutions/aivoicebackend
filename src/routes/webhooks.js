@@ -47,6 +47,7 @@ const prisma = require('../lib/prisma')
 const calendarService = require('../services/calendar')
 const crmService      = require('../services/crm')
 const billingService  = require('../services/billing')
+const { estimateCallCost } = require('../services/callCost')
 
 // ── Auth: supports BOTH Vapi auth styles ───────────────────────────────────────
 // 1. Legacy inline `secret` field → arrives as `x-vapi-secret` header (plain match)
@@ -189,7 +190,7 @@ async function handleCallEnded(event) {
 
   const callRecord = await prisma.call.findFirst({
     where: { vapiCallId: call.id },
-    include: { tenant: true, lead: true }
+    include: { tenant: true, lead: true, phoneNumber: true }
   })
   if (!callRecord) return
 
@@ -244,12 +245,19 @@ async function handleCallEnded(event) {
   const billedMinutes = Math.ceil(durationSeconds / 6) / 10
   const billedAmount  = billedMinutes * callRecord.tenant.ratePerMinute
 
+  // Real vendor cost estimate (internal cost visibility, not client billing).
+  // Computed once here so historical calls keep the rate in effect at completion
+  // time even if the per-minute env rates change later.
+  const { costTelephony, costVapi, costStt, costLlm, costTts, costTotal } =
+    estimateCallCost(durationSeconds, callRecord.phoneNumber)
+
   await prisma.call.update({
     where: { id: callRecord.id },
     data: {
       status: 'COMPLETED',
       outcome: finalOutcome, durationSeconds, transcript, summary, recordingUrl,
       billedMinutes, billedAmount,
+      costTelephony, costVapi, costStt, costLlm, costTts, costTotal,
       endedAt: new Date()
     }
   })

@@ -341,7 +341,10 @@ router.get('/tenants/:id/numbers', async (req, res, next) => {
 // POST /api/admin/tenants/:id/numbers — manually assign (no auto-buy)
 router.post('/tenants/:id/numbers', async (req, res, next) => {
   try {
-    const { number, friendlyName, country, provider, twilioSid, plivoUuid, vapiNumberId, isDefault } = req.body
+    const {
+      number, friendlyName, country, provider, twilioSid, plivoUuid, vapiNumberId,
+      isDefault, isCallbackNumber, telephonyCostPerMinute
+    } = req.body
     if (!number || !country)
       return res.status(400).json({ error: 'number and country required' })
 
@@ -351,6 +354,13 @@ router.post('/tenants/:id/numbers', async (req, res, next) => {
         data: { isDefault: false }
       })
     }
+    // Only one callback number per country per tenant, same reasoning as isDefault above.
+    if (isCallbackNumber) {
+      await prisma.tenantPhone.updateMany({
+        where: { tenantId: req.params.id, country, isCallbackNumber: true },
+        data: { isCallbackNumber: false }
+      })
+    }
 
     const phone = await prisma.tenantPhone.create({
       data: {
@@ -358,10 +368,53 @@ router.post('/tenants/:id/numbers', async (req, res, next) => {
         number, friendlyName: friendlyName || number,
         country, provider: provider || 'TWILIO',
         twilioSid, plivoUuid, vapiNumberId,
-        isDefault: isDefault || false
+        isDefault: isDefault || false,
+        isCallbackNumber: isCallbackNumber || false,
+        telephonyCostPerMinute: telephonyCostPerMinute != null ? parseFloat(telephonyCostPerMinute) : null
       }
     })
     res.status(201).json(phone)
+  } catch (err) { next(err) }
+})
+
+// PATCH /api/admin/tenants/:tenantId/numbers/:numberId — update an existing number's
+// flags/rate without deleting and re-creating it (e.g. flag the India business number
+// as the callback number once it's provisioned, or fix a telephony rate later).
+router.patch('/tenants/:tenantId/numbers/:numberId', async (req, res, next) => {
+  try {
+    const phone = await prisma.tenantPhone.findFirst({
+      where: { id: req.params.numberId, tenantId: req.params.tenantId }
+    })
+    if (!phone) return res.status(404).json({ error: 'Number not found' })
+
+    const { friendlyName, isDefault, isActive, isCallbackNumber, telephonyCostPerMinute } = req.body
+
+    if (isDefault) {
+      await prisma.tenantPhone.updateMany({
+        where: { tenantId: req.params.tenantId, country: phone.country, isDefault: true },
+        data: { isDefault: false }
+      })
+    }
+    if (isCallbackNumber) {
+      await prisma.tenantPhone.updateMany({
+        where: { tenantId: req.params.tenantId, country: phone.country, isCallbackNumber: true },
+        data: { isCallbackNumber: false }
+      })
+    }
+
+    const updated = await prisma.tenantPhone.update({
+      where: { id: phone.id },
+      data: {
+        ...(friendlyName !== undefined && { friendlyName }),
+        ...(isDefault !== undefined && { isDefault }),
+        ...(isActive !== undefined && { isActive }),
+        ...(isCallbackNumber !== undefined && { isCallbackNumber }),
+        ...(telephonyCostPerMinute !== undefined && {
+          telephonyCostPerMinute: telephonyCostPerMinute != null ? parseFloat(telephonyCostPerMinute) : null
+        })
+      }
+    })
+    res.json(updated)
   } catch (err) { next(err) }
 })
 
