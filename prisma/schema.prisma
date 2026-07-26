@@ -104,6 +104,10 @@ model TenantPhone {
   createdAt     DateTime  @default(now())
 
   calls         Call[]
+  // If this same physical number is also used for inbound (AI receptionist
+  // answering calls to it), the InboundPhoneNumber record links back here
+  // instead of re-importing the number into Vapi a second time.
+  inboundLinks  InboundPhoneNumber[]
 }
 
 // ─────────────────────────────────────────────
@@ -413,10 +417,18 @@ model InboundPhoneNumber {
   phoneNumber String   @unique
   country     String   @default("CA")
   twilioSid   String?
+  plivoUuid   String?             // Plivo number ID (provider = "plivo")
   vapiPhoneId String?
   provider    String   @default("twilio")
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
+
+  // Set when this inbound number is the SAME physical number already used for
+  // outbound calling — in that case vapiPhoneId is copied from that TenantPhone's
+  // vapiNumberId instead of importing the number into Vapi a second time (Vapi
+  // treats a phone number as one unique resource; re-importing it would fail).
+  linkedTenantPhoneId String?
+  linkedTenantPhone   TenantPhone? @relation(fields: [linkedTenantPhoneId], references: [id])
 
   assistants  InboundAssistant[]
   calls       InboundCall[]
