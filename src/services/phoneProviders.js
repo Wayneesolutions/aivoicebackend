@@ -145,4 +145,9 @@ async function releaseNumber({ provider, twilioSid, plivoUuid, vapiNumberId }) {
   }
 }
 
-module.exports = { searchAvailable, buyAndRegister, releaseNumber }
+module.exports = {
+  searchAvailable, buyAndRegister, releaseNumber,
+  // Exported so inbound routes can register an already-owned number in Vapi
+  // (e.g. "import existing number" for Plivo) without duplicating this logic.
+  registerInVapiTwilio, registerInVapiPlivo,
+}
