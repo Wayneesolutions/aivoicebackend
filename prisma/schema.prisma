@@ -101,6 +101,15 @@ model TenantPhone {
 
   isDefault     Boolean   @default(false)
   isActive      Boolean   @default(true)
+  // If true, genuine callback leads (status=CALLBACK with a real callbackAt) for this
+  // number's country are dialed from this number instead of the default number for
+  // that country. Lets a compliant 140-series number handle cold outreach while a
+  // registered business number (callable back) handles consented follow-ups.
+  isCallbackNumber Boolean @default(false)
+  // Real telephony cost per connected minute for this specific number/provider
+  // (e.g. Twilio CA ~0.014, Plivo IN domestic ~0.0055). Used for cost reporting only —
+  // does not affect client billing. Null = fall back to TELEPHONY_COST_PER_MINUTE_DEFAULT.
+  telephonyCostPerMinute Float?
   createdAt     DateTime  @default(now())
 
   calls         Call[]
@@ -341,10 +350,20 @@ model Call {
   meetingLink        String?
   calEventId         String?
   
-  // Billing
+  // Billing (what we charge the client)
   billedMinutes   Float?      // rounded up to nearest 0.1 min
   billedAmount    Float?      // billedMinutes * tenant.ratePerMinute
-  
+
+  // Real vendor cost estimate (what this call actually cost us), computed at call
+  // completion from durationSeconds so historical rates stay frozen even if the
+  // per-minute env rates change later. Not shown to clients — internal cost visibility.
+  costTelephony   Float?      // Twilio/Plivo leg, from phoneNumber.telephonyCostPerMinute
+  costVapi        Float?      // Vapi orchestration fee
+  costStt         Float?      // Deepgram speech-to-text
+  costLlm         Float?      // OpenAI gpt-4o-mini
+  costTts         Float?      // ElevenLabs / Cartesia voice synthesis
+  costTotal       Float?      // sum of the above
+
   sentimentLog    Json?       // array of { ts, sentiment, intent, buying_signal, suggested_action }
 
   startedAt       DateTime?

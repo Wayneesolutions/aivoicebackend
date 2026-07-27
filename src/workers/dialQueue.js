@@ -242,7 +242,8 @@ async function runScheduler(campaignId = null, directExec = false) {
     console.log(`[dialQueue] Campaign "${campaign.name}" — ${leads.length} lead(s) eligible${callbackCount ? ` (${callbackCount} scheduled callback${callbackCount > 1 ? 's' : ''})` : ''}`)
 
     for (const lead of leads) {
-      const phoneRecord = pickNumberForLead(campaign.tenant.phoneNumbers, lead.country)
+      const isGenuineCallback = lead.status === 'CALLBACK' && !!lead.callbackAt
+      const phoneRecord = pickNumberForLead(campaign.tenant.phoneNumbers, lead.country, isGenuineCallback)
       if (!phoneRecord) {
         console.warn(`[dialQueue] No number for country ${lead.country} — tenant ${campaign.tenantId}`)
         continue
@@ -456,7 +457,16 @@ function isWithinCallingHours(campaign, now) {
   return campaign.callDays.split(',').includes(dayName) && hour >= campaign.callFromHour && hour < campaign.callToHour
 }
 
-function pickNumberForLead(phoneNumbers, country) {
+function pickNumberForLead(phoneNumbers, country, isGenuineCallback = false) {
+  // Genuine callback (real prior conversation, lead asked for this specific time):
+  // prefer a number flagged isCallbackNumber for this country, e.g. a registered,
+  // callable-back business number instead of the cold-outreach (e.g. 140-series) one.
+  // If no such number is configured for this country yet, fall through to the normal
+  // selection below so behavior for every other country is completely unchanged.
+  if (isGenuineCallback) {
+    const callbackNumber = phoneNumbers.find(n => n.country === country && n.isCallbackNumber && n.isActive)
+    if (callbackNumber) return callbackNumber
+  }
   return (
     phoneNumbers.find(n => n.country === country && n.isDefault && n.isActive) ||
     phoneNumbers.find(n => n.country === country && n.isActive) ||

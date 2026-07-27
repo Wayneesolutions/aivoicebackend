@@ -91,6 +91,77 @@ router.get('/stats', requireTenantUser, async (req, res, next) => {
   } catch (err) { next(err) }
 })
 
+// GET /api/calls/costs — real vendor cost breakdown for the Cost dashboard.
+// Internal cost visibility only (what we actually pay Twilio/Plivo/Vapi/Deepgram/
+// OpenAI/ElevenLabs) — separate from billedAmount, which is what the client is
+// charged. Only calls with a computed costTotal (i.e. COMPLETED calls) count.
+router.get('/costs', requireTenantUser, async (req, res, next) => {
+  try {
+    const { from, to } = req.query
+    const costsFrom = from ? new Date(from) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+    const costsTo   = to   ? new Date(to)   : new Date()
+
+    const calls = await prisma.call.findMany({
+      where: {
+        tenantId: req.tenant.id,
+        createdAt: { gte: costsFrom, lte: costsTo },
+        costTotal: { not: null }
+      },
+      select: {
+        costTelephony: true, costVapi: true, costStt: true, costLlm: true, costTts: true,
+        costTotal: true, outcome: true, billedAmount: true,
+        lead: { select: { country: true } }
+      }
+    })
+
+    const round = n => Math.round((n || 0) * 100) / 100
+
+    const totals = calls.reduce((acc, c) => {
+      acc.telephony += c.costTelephony || 0
+      acc.vapi      += c.costVapi      || 0
+      acc.stt       += c.costStt       || 0
+      acc.llm       += c.costLlm       || 0
+      acc.tts       += c.costTts       || 0
+      acc.total     += c.costTotal     || 0
+      acc.billed    += c.billedAmount  || 0
+      return acc
+    }, { telephony: 0, vapi: 0, stt: 0, llm: 0, tts: 0, total: 0, billed: 0 })
+
+    // By country
+    const byCountryMap = {}
+    for (const c of calls) {
+      const country = c.lead?.country || 'Unknown'
+      if (!byCountryMap[country]) byCountryMap[country] = { country, calls: 0, cost: 0 }
+      byCountryMap[country].calls++
+      byCountryMap[country].cost += c.costTotal || 0
+    }
+    const byCountry = Object.values(byCountryMap)
+      .map(c => ({ ...c, cost: round(c.cost) }))
+      .sort((a, b) => b.cost - a.cost)
+
+    const bookedCount = calls.filter(c => c.outcome === 'BOOKED').length
+
+    res.json({
+      period: { from: costsFrom, to: costsTo },
+      totalCalls: calls.length,
+      byVendor: {
+        telephony: round(totals.telephony),
+        vapi:      round(totals.vapi),
+        stt:       round(totals.stt),
+        llm:       round(totals.llm),
+        tts:       round(totals.tts)
+      },
+      totalCost: round(totals.total),
+      totalBilled: round(totals.billed),
+      grossMargin: round(totals.billed - totals.total),
+      byCountry,
+      costPerCall: calls.length > 0 ? round(totals.total / calls.length) : 0,
+      bookedMeetings: bookedCount,
+      costPerBookedMeeting: bookedCount > 0 ? round(totals.total / bookedCount) : null
+    })
+  } catch (err) { next(err) }
+})
+
 // Return fresh recording URL as JSON (audio elements can't send auth headers for redirects)
 router.get('/:id/recording', requireTenantUser, async (req, res, next) => {
   try {
