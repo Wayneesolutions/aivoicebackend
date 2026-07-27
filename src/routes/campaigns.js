@@ -6,7 +6,7 @@ const { triggerCampaign, drainCampaignJobs } = require('../workers/dialQueue')
 
 router.get('/', requireTenantUser, async (req, res, next) => {
   try {
-    const [campaigns, outcomeRows] = await Promise.all([
+    const [campaigns, outcomeRows, leadStatusRows] = await Promise.all([
       prisma.campaign.findMany({
         where: { tenantId: req.tenant.id },
         include: {
@@ -19,6 +19,11 @@ router.get('/', requireTenantUser, async (req, res, next) => {
         by: ['campaignId', 'outcome'],
         where: { tenantId: req.tenant.id, campaignId: { not: null }, status: 'COMPLETED', outcome: { not: null } },
         _count: { id: true }
+      }),
+      prisma.lead.groupBy({
+        by: ['campaignId', 'status'],
+        where: { tenantId: req.tenant.id, campaignId: { not: null } },
+        _count: { id: true }
       })
     ])
 
@@ -28,7 +33,17 @@ router.get('/', requireTenantUser, async (req, res, next) => {
       outcomeMap[row.campaignId][row.outcome] = row._count.id
     })
 
-    res.json(campaigns.map(c => ({ ...c, outcomeCounts: outcomeMap[c.id] || {} })))
+    const leadStatusMap = {}
+    leadStatusRows.forEach(row => {
+      if (!leadStatusMap[row.campaignId]) leadStatusMap[row.campaignId] = {}
+      leadStatusMap[row.campaignId][row.status] = row._count.id
+    })
+
+    res.json(campaigns.map(c => ({
+      ...c,
+      outcomeCounts: outcomeMap[c.id] || {},
+      leadStatusCounts: leadStatusMap[c.id] || {},
+    })))
   } catch (err) { next(err) }
 })
 

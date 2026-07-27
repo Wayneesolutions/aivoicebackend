@@ -47,7 +47,7 @@ async function searchPlivo({ country = 'IN', pattern, limit = 20 }) {
   if (pattern) params.pattern = pattern
 
   const res = await client.numbers.search(country, params)
-  const objects = res.objects ?? []
+  const objects = Array.isArray(res) ? res : (res.objects ?? [])
 
   return objects.map(n => ({
     number:       n.number,
@@ -56,7 +56,7 @@ async function searchPlivo({ country = 'IN', pattern, limit = 20 }) {
     provider:     'PLIVO',
     locality:     '',
     region:       n.region ?? '',
-    monthlyPrice: n.monthly_rental_rate ?? null,
+    monthlyPrice: n.monthlyRentalRate ?? n.monthly_rental_rate ?? null,
   }))
 }
 
