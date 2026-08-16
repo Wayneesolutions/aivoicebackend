@@ -7,6 +7,8 @@ const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const { parsePhoneNumberFromString } = require('libphonenumber-js')
 const { triggerCampaign } = require('../workers/dialQueue')
+const vapiService   = require('../services/vapi')
+const scriptService = require('../services/script')
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } })
 
@@ -255,6 +257,128 @@ router.post('/:id/redial', requireTenantOwner, async (req, res, next) => {
     }
 
     res.json({ lead, queued, campaignStatus: campaignStatus || null })
+  } catch (err) { next(err) }
+})
+
+// POST /api/leads/call — place a single call RIGHT NOW, bypassing the CSV-upload +
+// campaign flow entirely (previously the ONLY way to trigger any call was
+// upload-a-file → create-campaign → start-campaign, even for one lead).
+// Deliberately bypasses campaign calling-hours gating (callFromHour/callToHour/callDays)
+// — this is an explicit human "call now" action, same intent as a manual dial button,
+// not an automated campaign dial. Caller is responsible for only using it during
+// hours appropriate for the destination.
+// body: { scriptId, phone, name?, company?, title?, country? }
+router.post('/call', requireTenantOwner, async (req, res, next) => {
+  try {
+    const { scriptId, phone, name, company, title, country } = req.body
+    if (!scriptId || !phone) return res.status(400).json({ error: 'scriptId and phone are required' })
+
+    const script = await prisma.script.findFirst({ where: { id: scriptId, tenantId: req.tenant.id } })
+    if (!script) return res.status(404).json({ error: 'Script not found' })
+    if (!['APPROVED', 'LIVE'].includes(script.status))
+      return res.status(400).json({ error: 'Script must be approved before it can be used to call' })
+
+    let vapiAssistantId
+    try {
+      vapiAssistantId = JSON.parse(script.compiledPrompt || '{}').vapiAssistantId
+    } catch { /* falls through to the check below */ }
+    if (!vapiAssistantId) return res.status(400).json({ error: 'Script has no compiled Vapi assistant — re-approve it first' })
+
+    const phoneObj = parsePhoneNumberFromString(phone, country || 'US')
+    if (!phoneObj || !phoneObj.isValid()) return res.status(400).json({ error: `Invalid phone number "${phone}"` })
+    const e164 = phoneObj.format('E.164')
+    const leadCountry = (country || 'US').toUpperCase()
+
+    // req.tenant.phoneNumbers is already loaded by requireTenantUser — no extra query
+    const phoneRecord =
+      req.tenant.phoneNumbers.find(n => n.country === leadCountry && n.isDefault && n.isActive && n.vapiNumberId) ||
+      req.tenant.phoneNumbers.find(n => n.country === leadCountry && n.isActive && n.vapiNumberId) ||
+      req.tenant.phoneNumbers.find(n => n.isActive && n.vapiNumberId)
+    if (!phoneRecord) return res.status(400).json({ error: 'No active phone number configured for your account — contact your admin' })
+
+    let lead = await prisma.lead.findFirst({ where: { tenantId: req.tenant.id, phone: e164 } })
+    if (lead?.isOptedOut) return res.status(400).json({ error: 'This lead has opted out of calls and cannot be called' })
+
+    if (lead) {
+      lead = await prisma.lead.update({
+        where: { id: lead.id },
+        data: {
+          name:    name || lead.name,
+          company: company !== undefined ? company : lead.company,
+          title:   title   !== undefined ? title   : lead.title,
+        }
+      })
+    } else {
+      lead = await prisma.lead.create({
+        data: {
+          tenantId: req.tenant.id, phone: e164,
+          name:    (name || 'Unnamed lead').trim(),
+          company: company || null,
+          title:   title   || null,
+          country: leadCountry,
+        }
+      })
+    }
+
+    // Same optimistic lock dialQueue.js uses — prevents double-dialing if this
+    // endpoint is hit twice in quick succession for the same lead.
+    const grabbed = await prisma.lead.updateMany({
+      where: { id: lead.id, status: { not: 'CALLING' } },
+      data:  { status: 'CALLING' }
+    })
+    if (grabbed.count === 0) return res.status(409).json({ error: 'This lead already has a call in progress' })
+
+    const callRecord = await prisma.call.create({
+      data: {
+        tenantId: req.tenant.id, leadId: lead.id,
+        phoneNumberId: phoneRecord.id,
+        status: 'INITIATED', direction: 'outbound',
+      }
+    })
+
+    let systemPromptOverride = null
+    let firstMessageOverride = null
+    try {
+      if (script.callType === 'survey') firstMessageOverride = scriptService.buildSurveyFirstMessage(script)
+      const dateBlock = `TODAY: ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}. All meetings and callbacks MUST be scheduled for future dates only.\n\n`
+      systemPromptOverride = dateBlock + scriptService.compileSystemPrompt(script)
+    } catch (err) {
+      console.error(`[leads/call] Could not compile prompt for lead ${lead.id}:`, err.message)
+    }
+
+    let vapiCall
+    try {
+      vapiCall = await vapiService.startOutboundCall({
+        toNumber: e164,
+        vapiNumberId: phoneRecord.vapiNumberId,
+        vapiAssistantId,
+        voiceOverrideId: req.tenant.clonedVoiceId || undefined,
+        systemPromptOverride,
+        firstMessageOverride,
+        language: script.language,
+        agentGender: script.agentGender,
+        metadata: {
+          tenantId: req.tenant.id, leadId: lead.id, campaignId: null, callRecordId: callRecord.id,
+          leadName: lead.name, leadCompany: lead.company || '', leadTitle: lead.title || ''
+        }
+      })
+    } catch (err) {
+      await prisma.call.update({ where: { id: callRecord.id }, data: { status: 'FAILED' } }).catch(() => {})
+      await prisma.lead.update({ where: { id: lead.id }, data: { status: 'PENDING' } }).catch(() => {})
+      const vapiMsg = err.response?.data?.message || err.message
+      return res.status(502).json({ error: `Call could not be placed: ${vapiMsg}` })
+    }
+
+    await prisma.call.update({
+      where: { id: callRecord.id },
+      data:  { vapiCallId: vapiCall.id, status: 'RINGING', startedAt: new Date() }
+    })
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data:  { callAttempts: { increment: 1 }, lastCalledAt: new Date() }
+    })
+
+    res.status(201).json({ message: 'Call initiated', callId: callRecord.id, leadId: lead.id, vapiCallId: vapiCall.id })
   } catch (err) { next(err) }
 })
 
