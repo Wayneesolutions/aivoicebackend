@@ -66,6 +66,16 @@ function parseFileToRows(buffer, originalname) {
 }
 
 // POST /api/leads/upload — CSV or XLSX upload
+// Optional per-row scheduled call time (column: call_at / callback_at / "Call At" /
+// "Callback At" / "Call Time" — ISO 8601 recommended, e.g. 2026-08-20T15:00:00+05:30).
+// A lead with a valid future call_at is created directly as status CALLBACK with that
+// callbackAt — dialQueue.js's scheduler ALREADY dials due, explicitly-scheduled
+// CALLBACK leads regardless of the campaign's calling-hours window (see
+// isWithinCallingHours / the "genuine callback" branch in runScheduler), so this is
+// the one column needed to support "call me at 3pm" leads from a bulk upload — the
+// engine honoring it was already built, it just had no way to receive the time.
+// Requires the lead to land in an ACTIVE campaign (pass campaignId) to actually be
+// picked up by the scheduler — same requirement as any other uploaded lead.
 router.post('/upload', requireTenantOwner, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
@@ -73,7 +83,7 @@ router.post('/upload', requireTenantOwner, upload.single('file'), async (req, re
 
     const rows = parseFileToRows(req.file.buffer, req.file.originalname)
 
-    const results = { imported: 0, skipped: 0, errors: [] }
+    const results = { imported: 0, skipped: 0, scheduled: 0, errors: [] }
     const parsed = []
 
     // Pass 1: parse and validate all rows without hitting the DB
@@ -94,13 +104,27 @@ router.post('/upload', requireTenantOwner, upload.single('file'), async (req, re
         continue
       }
 
+      const rawCallAt = row.call_at || row['Call At'] || row.callback_at || row['Callback At'] || row['Call Time'] || row.call_time
+      let callbackAt = null
+      if (rawCallAt) {
+        const parsedDate = new Date(rawCallAt)
+        if (Number.isNaN(parsedDate.getTime())) {
+          // Not fatal — the lead is still worth importing, just without a scheduled
+          // time (falls back to normal PENDING/campaign-hours dialing).
+          results.errors.push(`Row ${i + 2}: could not parse call_at "${rawCallAt}" — imported without a scheduled time`)
+        } else {
+          callbackAt = parsedDate
+        }
+      }
+
       parsed.push({
         phone:   phoneObj.format('E.164'),
         name:    name.trim(),
         email:   row.email   || row.Email   || null,
         company: row.company || row.Company || null,
         title:   row.title   || row.Title   || null,
-        country: (row.country || row.Country || 'US').toUpperCase()
+        country: (row.country || row.Country || 'US').toUpperCase(),
+        ...(callbackAt ? { status: 'CALLBACK', callbackAt } : {})
       })
     }
 
@@ -131,6 +155,7 @@ router.post('/upload', requireTenantOwner, upload.single('file'), async (req, re
         ...p
       })
       results.imported++
+      if (p.callbackAt) results.scheduled++
     }
 
     if (toCreate.length > 0) {
@@ -144,6 +169,15 @@ router.post('/upload', requireTenantOwner, upload.single('file'), async (req, re
       toCreate.forEach(lead => { lead.uploadBatchId = batch.id })
       await prisma.lead.createMany({ data: toCreate })
       results.batchId = batch.id
+    }
+
+    // Leads created with a scheduled call_at are status CALLBACK, not PENDING —
+    // POST /api/campaigns' batchId and includeAllLeads assignment paths both
+    // filter on status: 'PENDING' (see campaigns.js), so they will NOT be swept
+    // up by "assign this whole batch" or "assign all unassigned leads" later.
+    // Only that campaign's explicit leadIds array picks up CALLBACK leads.
+    if (results.scheduled > 0 && !campaignId) {
+      results.warning = `${results.scheduled} lead(s) have a scheduled call time and were created without a campaign. They will NOT be picked up by "assign whole batch" or "assign all unassigned leads" when creating a campaign (both only sweep PENDING leads) — assign them explicitly via the campaign's leadIds array, or re-upload with campaignId set.`
     }
 
     res.json(results)
