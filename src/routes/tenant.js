@@ -4,10 +4,12 @@ const multer = require('multer')
 const axios  = require('axios')
 const bcrypt = require('bcryptjs')
 const path   = require('path')
+const crypto = require('crypto')
 const prisma = require('../lib/prisma')
 const { requireTenantUser, requireTenantOwner } = require('../middleware/auth')
 const { getUsageSummary } = require('../services/billing')
 const storageService = require('../services/storage')
+const outboundWebhook = require('../services/outboundWebhook')
 
 const logoUpload = multer({
   storage: multer.memoryStorage(),
@@ -56,6 +58,8 @@ router.get('/me', requireTenantUser, async (req, res) => {
     } : null,
     waRequestedPhone: t.waRequestedPhone || null,
     hasWaConfig: !!(waConfig?.phoneNumberId),
+    webhookUrl: t.webhookUrl || null,
+    hasWebhookSecret: !!t.webhookSecret,
   })
 })
 
@@ -200,6 +204,54 @@ router.patch('/integrations', requireTenantOwner, async (req, res, next) => {
     allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k] })
     await prisma.tenant.update({ where: { id: req.tenant.id }, data })
     res.json({ message: 'Integrations updated' })
+  } catch (err) { next(err) }
+})
+
+// PATCH /api/tenant/webhook — configure (or clear) the outbound call.completed webhook.
+// Send { webhookUrl: null } to disable delivery again.
+router.patch('/webhook', requireTenantOwner, async (req, res, next) => {
+  try {
+    const { webhookUrl, webhookSecret } = req.body
+    const data = {}
+
+    if (webhookUrl !== undefined) {
+      if (webhookUrl === null || webhookUrl === '') {
+        data.webhookUrl = null
+      } else {
+        try {
+          const parsed = new URL(webhookUrl)
+          if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error()
+        } catch {
+          return res.status(400).json({ error: 'webhookUrl must be a valid http(s) URL' })
+        }
+        data.webhookUrl = webhookUrl
+      }
+    }
+
+    if (webhookSecret !== undefined) {
+      data.webhookSecret = webhookSecret === '' ? null : webhookSecret
+    }
+
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'No valid fields provided' })
+
+    const tenant = await prisma.tenant.update({ where: { id: req.tenant.id }, data })
+    res.json({ webhookUrl: tenant.webhookUrl || null, hasWebhookSecret: !!tenant.webhookSecret })
+  } catch (err) { next(err) }
+})
+
+// POST /api/tenant/webhook/test — sends one signed test event to the configured
+// URL right now, so the integrator can verify the endpoint + signature before
+// going live rather than waiting for a real call to complete.
+router.post('/webhook/test', requireTenantOwner, async (req, res, next) => {
+  try {
+    const tenant = await prisma.tenant.findUnique({ where: { id: req.tenant.id } })
+    if (!tenant?.webhookUrl) return res.status(400).json({ error: 'No webhookUrl configured — set one via PATCH /api/tenant/webhook first' })
+
+    await outboundWebhook.deliverWebhook(tenant, 'webhook.test', {
+      message: 'This is a test event from VoCallM — your webhook is configured correctly.',
+      sentAt: new Date().toISOString(),
+    })
+    res.json({ message: 'Test event delivery attempted — check your endpoint logs to confirm it arrived and the signature verified' })
   } catch (err) { next(err) }
 })
 

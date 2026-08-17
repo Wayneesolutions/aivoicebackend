@@ -48,6 +48,7 @@ const calendarService = require('../services/calendar')
 const crmService      = require('../services/crm')
 const billingService  = require('../services/billing')
 const { estimateCallCost } = require('../services/callCost')
+const outboundWebhook = require('../services/outboundWebhook')
 
 // ── Auth: supports BOTH Vapi auth styles ───────────────────────────────────────
 // 1. Legacy inline `secret` field → arrives as `x-vapi-secret` header (plain match)
@@ -319,6 +320,27 @@ async function handleCallEnded(event) {
       console.error('[webhook] WA bridge failed:', err.message)
     )
   }
+
+  // Outbound webhook — delivers the outcome immediately instead of making the
+  // integrator poll GET /api/calls. No-op if the tenant hasn't configured a webhookUrl.
+  outboundWebhook.deliverWebhook(callRecord.tenant, 'call.completed', {
+    callId: callRecord.id,
+    direction: 'outbound',
+    leadId: callRecord.leadId,
+    campaignId: callRecord.campaignId,
+    providerCallId: call.id, // vapiCallId — matches ai_voice_calls.provider_call_id on the integrator side
+    status: 'COMPLETED',
+    outcome: finalOutcome,
+    durationSeconds,
+    transcript,
+    summary,
+    recordingUrl,
+    billedMinutes,
+    billedAmount,
+    meetingBookedAt: callRecord.meetingBookedAt || (outcome === 'BOOKED' ? new Date().toISOString() : null),
+    startedAt: callRecord.startedAt,
+    endedAt: new Date().toISOString(),
+  }).catch(err => console.error('[webhook] outbound webhook dispatch failed:', err.message))
 }
 
 // Per-tenant system list name — all leads who opt in via Quor calls land here.
@@ -980,6 +1002,22 @@ router.post('/vapi-inbound', async (req, res) => {
             duration: durationSeconds,
           }).catch(err => console.error('[webhook/vapi-inbound] notification failed:', err.message));
         }
+
+        outboundWebhook.deliverWebhook(callRecord.tenant, 'call.completed', {
+          callId: callRecord.id,
+          direction: 'inbound',
+          providerCallId: vapiCallId,
+          callerNumber: callRecord.callerNumber,
+          calledNumber: callRecord.calledNumber,
+          status: 'COMPLETED',
+          outcome,
+          durationSeconds,
+          transcript: Array.isArray(transcript) ? transcript : [],
+          summary,
+          recordingUrl,
+          startedAt: callRecord.startedAt,
+          endedAt: new Date().toISOString(),
+        }).catch(err => console.error('[webhook/vapi-inbound] outbound webhook dispatch failed:', err.message));
 
         console.log(`[webhook/vapi-inbound] Call ${vapiCallId} saved — outcome: ${outcome}, duration: ${durationSeconds}s`);
         break;

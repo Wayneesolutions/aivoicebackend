@@ -59,6 +59,13 @@ model Tenant {
   // WhatsApp — client-submitted number request (admin reads this and sets WaTenantConfig)
   waRequestedPhone String?
 
+  // Outbound webhook — delivers call.completed events (outbound + inbound) as they
+  // happen, so an integrator (e.g. Plotra) doesn't have to poll GET /api/calls /
+  // GET /api/inbound/calls for outcomes. Both null = webhooks disabled for this
+  // tenant (existing polling integrations keep working unchanged).
+  webhookUrl      String?
+  webhookSecret   String?   // HMAC-SHA256 key — every delivery is signed, see outboundWebhook.js
+
   // Relations
   phoneNumbers         TenantPhone[]
   campaigns            Campaign[]
