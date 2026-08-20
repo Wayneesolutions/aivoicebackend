@@ -49,6 +49,7 @@ const crmService      = require('../services/crm')
 const billingService  = require('../services/billing')
 const { estimateCallCost } = require('../services/callCost')
 const outboundWebhook = require('../services/outboundWebhook')
+const vapiService     = require('../services/vapi')
 
 // ── Auth: supports BOTH Vapi auth styles ───────────────────────────────────────
 // 1. Legacy inline `secret` field → arrives as `x-vapi-secret` header (plain match)
@@ -236,7 +237,7 @@ async function handleCallEnded(event) {
 
   const transcript   = formatTranscript(artifact.transcript) || formatTranscript(artifact.messages)
   const summary      = analysis.summary || null
-  const recordingUrl = artifact.recordingUrl || null
+  const recordingUrl = artifact.recordingUrl || call.recordingUrl || null
 
   // Compliance override: scan transcript for explicit removal/opt-out language.
   // Runs AFTER the AI tool-call outcome is set, so it catches cases where the AI
@@ -262,6 +263,23 @@ async function handleCallEnded(event) {
       endedAt: new Date()
     }
   })
+
+  // Recording is processed by Vapi asynchronously after the call ends.
+  // If the URL wasn't in the webhook payload, fetch it from the Vapi API after 90s.
+  if (!recordingUrl) {
+    setTimeout(async () => {
+      try {
+        const vapiCall = await vapiService.getCall(call.id)
+        const url = vapiCall?.artifact?.recordingUrl || vapiCall?.recordingUrl || null
+        if (url) {
+          await prisma.call.update({ where: { id: callRecord.id }, data: { recordingUrl: url } })
+          console.log(`[webhook] Recording URL fetched (delayed) for call ${call.id}`)
+        }
+      } catch (err) {
+        console.error('[webhook] Delayed recording fetch failed:', err.message)
+      }
+    }, 90000)
+  }
 
   const leadStatusData = { status: outcomeToLeadStatus(finalOutcome) }
   if (finalOutcome === 'OPTED_OUT') {
