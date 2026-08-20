@@ -175,7 +175,7 @@ router.get('/:id/recording', requireTenantUser, async (req, res, next) => {
     if (call.vapiCallId) {
       try {
         const { data } = await vapiClient.get(`/call/${call.vapiCallId}`)
-        const freshUrl = data?.artifact?.recordingUrl || data?.recordingUrl
+        const freshUrl = data?.artifact?.presignedMonoUrl || data?.artifact?.recordingUrl || data?.recordingUrl
         if (freshUrl) return res.json({ url: freshUrl })
       } catch (vapiErr) {
         console.warn('[recording proxy] Vapi fetch failed, falling back to stored URL:', vapiErr.message)
@@ -200,7 +200,7 @@ router.get('/:id', requireTenantUser, async (req, res, next) => {
     if (call.vapiCallId && call.recordingUrl) {
       try {
         const { data } = await vapiClient.get(`/call/${call.vapiCallId}`)
-        freshRecordingUrl = data?.artifact?.recordingUrl || data?.recordingUrl || freshRecordingUrl
+        freshRecordingUrl = data?.artifact?.presignedMonoUrl || data?.artifact?.recordingUrl || data?.recordingUrl || freshRecordingUrl
       } catch { /* keep stored URL as fallback */ }
     }
 
