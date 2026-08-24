@@ -1,7 +1,7 @@
 require('dotenv').config()
 const { PrismaClient } = require('@prisma/client')
-const axios = require('axios')
-const { compileSystemPrompt, getVapiFunctions } = require('./src/services/script')
+const { upsertAssistant } = require('./src/services/vapi')
+const { compileSystemPrompt } = require('./src/services/script')
 const p = new PrismaClient()
 
 async function run() {
@@ -13,25 +13,23 @@ async function run() {
 
     const systemPrompt = compileSystemPrompt(s)
 
-    await axios.patch(
-      `https://api.vapi.ai/assistant/${meta.vapiAssistantId}`,
-      {
-        model: {
-          provider: 'openai',
-          model: 'gpt-4o-mini',
-          systemPrompt,
-          tools: getVapiFunctions(),
-          temperature: 0.8,
-          maxTokens: 250
-        },
-        firstMessage: `Hi, may I speak with {{prospect_name}}? This is ${s.agentName} calling.`,
-        serverUrl: `${process.env.BASE_URL}/api/webhooks/vapi`,
-        serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET
-      },
-      { headers: { Authorization: `Bearer ${process.env.VAPI_API_KEY}` } }
-    )
-    console.log(`✓ Updated assistant ${meta.vapiAssistantId} for script "${s.name}"`)
+    try {
+      await upsertAssistant({
+        name:                s.name,
+        systemPrompt,
+        voiceId:             s.voiceId,
+        agentName:           s.agentName,
+        language:            s.language,
+        agentGender:         s.agentGender,
+        existingAssistantId: meta.vapiAssistantId,
+        maxCallDuration:     s.maxCallDuration,
+        callType:            s.callType,
+      })
+      console.log(`✓ Updated assistant ${meta.vapiAssistantId} for script "${s.name}"`)
+    } catch (err) {
+      console.error(`✗ Failed "${s.name}":`, err.message)
+    }
   }
   await p.$disconnect()
 }
-run().catch(e => { console.error(e.response?.data || e.message); process.exit(1) })
+run().catch(e => { console.error(e.message); process.exit(1) })

@@ -185,9 +185,6 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
       model: CARTESIA_MODEL,
       voiceId: cartesiaVoiceId,
       language, // 'hi' or 'pa' — Cartesia's language param, improves pronunciation accuracy over auto-detect
-      ...(process.env.VAPI_CARTESIA_CREDENTIAL_ID
-        ? { credentialId: process.env.VAPI_CARTESIA_CREDENTIAL_ID }
-        : {}),
       fallbackPlan: {
         voices: [
           {
@@ -210,9 +207,6 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
     stability: 0.5,
     similarityBoost: 0.75,
     useSpeakerBoost: true,
-    ...(process.env.VAPI_ELEVENLABS_CREDENTIAL_ID
-      ? { credentialId: process.env.VAPI_ELEVENLABS_CREDENTIAL_ID }
-      : {}),
   }
 }
 // ───────────────────────────────────────────────────────────────────────
