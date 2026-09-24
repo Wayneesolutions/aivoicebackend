@@ -152,6 +152,28 @@ function shouldUseCartesia(language) {
   return CARTESIA_TTS_ENABLED && CARTESIA_TTS_LANGUAGES.has(language)
 }
 
+// A voice the client explicitly picked in the script (e.g. their ElevenLabs
+// clone "noor"). The backend stores ELEVENLABS_DEFAULT_VOICE_ID when nothing
+// is picked, so that value (and Vapi's builtin) count as "not chosen".
+// FIX: previously Hindi/Punjabi ALWAYS went to Cartesia and silently threw
+// away the client's selected ElevenLabs voice.
+function isExplicitVoice(voiceId) {
+  return !!voiceId &&
+    voiceId !== VAPI_BUILTIN_VOICE &&
+    voiceId !== process.env.ELEVENLABS_DEFAULT_VOICE_ID
+}
+
+function buildElevenLabsVoice(voiceId) {
+  return {
+    provider: '11labs',
+    voiceId,
+    model: 'eleven_flash_v2_5', // multilingual — supports Hindi
+    stability: 0.5,
+    similarityBoost: 0.75,
+    useSpeakerBoost: true,
+  }
+}
+
 // Per-language, per-gender Cartesia voice IDs — set these in .env after
 // picking voices from Cartesia's Voice Library (play.cartesia.ai) for
 // Hindi and Punjabi specifically.
@@ -169,6 +191,20 @@ function resolveCartesiaVoiceId(language, gender) {
  * - All other languages: unchanged ElevenLabs config.
  */
 function buildVoiceConfig({ voiceId, language, agentGender }) {
+  // Client explicitly selected an ElevenLabs voice (e.g. a clone) → honour it
+  // for EVERY language. Cartesia stays as fallback for Hindi/Punjabi.
+  if (isExplicitVoice(voiceId)) {
+    console.log(`[VAPI] language="${language}" → using client-selected ElevenLabs voice ${voiceId}`)
+    const voice = buildElevenLabsVoice(voiceId)
+    if (shouldUseCartesia(language)) {
+      const cartesiaVoiceId = resolveCartesiaVoiceId(language, agentGender === 'male' ? 'male' : 'female')
+      if (cartesiaVoiceId) {
+        voice.fallbackPlan = { voices: [{ provider: 'cartesia', model: CARTESIA_MODEL, voiceId: cartesiaVoiceId, language }] }
+      }
+    }
+    return voice
+  }
+
   if (shouldUseCartesia(language)) {
     const gender = agentGender === 'male' ? 'male' : 'female'
     const cartesiaVoiceId = resolveCartesiaVoiceId(language, gender)
@@ -200,14 +236,7 @@ function buildVoiceConfig({ voiceId, language, agentGender }) {
   // Non-Hindi/Punjabi path — ElevenLabs.
   // Note: optimizeStreamingLatency was removed from ElevenLabs v3 API — Vapi rejects it with 400.
   warnIfVoiceLanguageMismatch({ voiceId, language })
-  return {
-    provider: '11labs',
-    voiceId,
-    model: 'eleven_flash_v2_5',
-    stability: 0.5,
-    similarityBoost: 0.75,
-    useSpeakerBoost: true,
-  }
+  return buildElevenLabsVoice(voiceId)
 }
 // ───────────────────────────────────────────────────────────────────────
 
@@ -344,7 +373,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
 /**
  * Trigger an outbound call via Vapi.
  */
-async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId, systemPromptOverride, firstMessageOverride, language, agentGender }) {
+async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId, scriptVoiceId, systemPromptOverride, firstMessageOverride, language, agentGender }) {
   if (!vapiNumberId) throw new Error('vapiNumberId is required for outbound calls')
 
   const assistantOverrides = {
@@ -355,20 +384,15 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
     }
   }
 
-  if (shouldUseCartesia(language)) {
-    // Hindi/Punjabi always route to Cartesia regardless of any ElevenLabs voiceOverrideId —
-    // an English voice override is meaningless for a Hindi/Punjabi call.
-    assistantOverrides.voice = buildVoiceConfig({ voiceId: voiceOverrideId, language, agentGender })
+  // Priority: 1) voice selected on the script  2) Cartesia for hi/pa
+  //           3) tenant-level clone override    4) whatever the assistant has
+  if (isExplicitVoice(scriptVoiceId)) {
+    assistantOverrides.voice = buildVoiceConfig({ voiceId: scriptVoiceId, language, agentGender })
+  } else if (shouldUseCartesia(language)) {
+    assistantOverrides.voice = buildVoiceConfig({ voiceId: null, language, agentGender })
   } else if (voiceOverrideId) {
     warnIfVoiceLanguageMismatch({ voiceId: voiceOverrideId, language })
-    assistantOverrides.voice = {
-      provider: '11labs',
-      voiceId: voiceOverrideId,
-      model: 'eleven_flash_v2_5',
-      stability: 0.5,
-      similarityBoost: 0.75,
-      useSpeakerBoost: true,
-    }
+    assistantOverrides.voice = buildElevenLabsVoice(voiceOverrideId)
   }
 
   if (systemPromptOverride) {

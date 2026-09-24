@@ -362,6 +362,7 @@ async function dialLead(job) {
   // re-approving — no stale Vapi snapshot ever used.
   let scriptLanguage = 'en'
   let scriptGender   = 'female'
+  let scriptVoiceId  = null
   let systemPromptOverride  = null
   let firstMessageOverride  = null
   try {
@@ -375,6 +376,7 @@ async function dialLead(job) {
     const script = campaign?.script
     scriptLanguage = script?.language   || 'en'
     scriptGender   = script?.agentGender || 'female'
+    scriptVoiceId  = script?.voiceId     || null
 
     // Always build firstMessage fresh — picks up callerOrg, agentName, gender, language changes
     if (script?.callType === 'survey') {
@@ -416,6 +418,7 @@ async function dialLead(job) {
     vapiCall = await vapiService.startOutboundCall({
       toNumber, vapiNumberId, vapiAssistantId,
       voiceOverrideId: clonedVoiceId || undefined,
+      scriptVoiceId,
       systemPromptOverride,
       firstMessageOverride,
       language: scriptLanguage,

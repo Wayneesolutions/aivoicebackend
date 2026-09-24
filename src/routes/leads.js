@@ -387,6 +387,7 @@ router.post('/call', requireTenantOwner, async (req, res, next) => {
         vapiNumberId: phoneRecord.vapiNumberId,
         vapiAssistantId,
         voiceOverrideId: req.tenant.clonedVoiceId || undefined,
+        scriptVoiceId: script.voiceId,
         systemPromptOverride,
         firstMessageOverride,
         language: script.language,
