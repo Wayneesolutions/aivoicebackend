@@ -70,6 +70,7 @@ function buildVapiAssistantPayload(assistant) {
       voiceId,
       model: 'eleven_flash_v2_5',
       stability: Number(process.env.ELEVENLABS_STABILITY || 0.4),
+      speed: Number(process.env.ELEVENLABS_SPEED || 1.05),
       similarityBoost: 0.75,
     },
     transcriber: {
