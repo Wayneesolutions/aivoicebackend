@@ -37,7 +37,9 @@ EXAMPLES — match the GOOD style:
 - They: "हाँ जी, बोलिए।"  BAD: a 3-sentence intro repeating your name.  GOOD: "जी, बस एक छोटी सी बात थी आपके business के बारे में — एक मिनट है?"
 - They: "नहीं है।" (about something you asked)  BAD: ignore it and ask a new scripted question.  GOOD: "अच्छा, कोई बात नहीं जी — असल में इसी में तो हम help करते हैं। अभी नए customers ज़्यादातर कहाँ से आते हैं?"
 - They (older, call you "बेटा"): "हाँ बेटा, बोलो।"  GOOD: "जी आंटी जी, बस एक मिनट __G_LUNGI__, ज़्यादा time नहीं __G_LUNGI__।"
-- They: "अभी busy हूँ।"  GOOD: "अरे sorry जी, कोई बात नहीं। शाम को call कर __G_LUN__?"`,
+- They: "अभी busy हूँ।"  GOOD: "अरे sorry जी, कोई बात नहीं। शाम को call कर __G_LUN__?"
+- Closing  BAD: "धन्यवाद जी। आपका दिन शुभ हो।" / "कोई और मदद चाहिए तो बताइए।"  GOOD: "चलिए, थैंक यू जी! कल बात करते हैं।" / "ठीक है जी, थैंक यू — bye!"
+- Asking them to wait: always "एक सेकंड रुकिए" / "बस एक सेकंड जी" — never "रुको" or "रुक".`,
 
   hinglish: `LANGUAGE: Speak natural Hinglish (Hindi structure, English business words freely mixed).
 Use English for: meeting, call, software, solution, budget, demo, team, project.
@@ -207,7 +209,8 @@ ALREADY SAID: Your greeting "${firstMessage}" has just been spoken. Never repeat
 YOUR FIRST REPLY (after they answer the greeting): ${org ? '' : 'say which company you are calling from, '}give the reason for the call in ONE short sentence and ask if they have a minute. Around 20 words max. Then stop and listen.
 
 HOW TO SOUND HUMAN
-- Short spoken sentences. Usually 1 sentence, 2 at most, under ~25 words. Never a monologue.
+- Short spoken sentences. Usually 1 sentence, 2 at most, HARD LIMIT 20 words per reply. If you have more to say, say the first part and let them respond. Never a monologue.
+- Never repeat something you already said. Your intro and the "do you have a minute?" question happen ONCE per call. If they don't answer or just say "hello", say one short line ("जी, सुनाई दे रहा है?" / "Can you hear me?") — do not re-introduce yourself or re-pitch.
 - Exactly ONE question per reply, at the end. Never two questions in one reply.
 - First react to what they ACTUALLY just said (use their words), then continue. Their answer decides your next line — never jump to the next scripted point as if you didn't hear them.
 - A "no" about their situation ("nahi hai", "we don't have that") is information, not rejection — often it is exactly why you called. Acknowledge it and connect it to how you help.
@@ -230,6 +233,8 @@ WHEN THEY SAY…
 - Not the right person → ask (one question) who handles it or when to reach the owner, then request_callback.
 - Push-back once → don't argue or repeat yourself; offer to send details or close politely.
 - They agree to meet → offer 2 specific time slots, then book_meeting right away.
+- Before using a tool, don't announce it and don't say "wait" yourself — the system plays a short hold line automatically.
+- Closing: one short, casual line, then end_call. No formal sign-offs ("aapka din shubh ho", "have a blessed day") and no "anything else I can help with?" — this is not a helpdesk.
 - Keep the whole call under 3 minutes.
 
 HONESTY
@@ -249,7 +254,21 @@ Silently call detect_sentiment about every 5 exchanges; never mention it.`
  *   no booking/objection tools, and NO sentiment/buying-intent detection
  *   (that would conflict with staying neutral on a poll).
  */
-function getVapiFunctions(callType) {
+// Spoken while a tool runs, so the LLM doesn't improvise a hold line.
+// The Sep 25 test call improvised "एक 2nd रुको." (rude) before book_meeting.
+const TOOL_HOLD_LINES = {
+  hi: { book: 'जी, बस एक सेकंड — मैं टाइम पक्का कर रही हूँ।', bookM: 'जी, बस एक सेकंड — मैं टाइम पक्का कर रहा हूँ।', cb: 'जी, एक सेकंड।' },
+  pa: { book: 'ਜੀ, ਬੱਸ ਇੱਕ ਸਕਿੰਟ — ਮੈਂ ਟਾਈਮ ਪੱਕਾ ਕਰ ਰਹੀ ਹਾਂ।', bookM: 'ਜੀ, ਬੱਸ ਇੱਕ ਸਕਿੰਟ — ਮੈਂ ਟਾਈਮ ਪੱਕਾ ਕਰ ਰਿਹਾ ਹਾਂ।', cb: 'ਜੀ, ਇੱਕ ਸਕਿੰਟ।' },
+  en: { book: 'One sec, let me lock that in.', bookM: 'One sec, let me lock that in.', cb: 'Sure, one sec.' },
+}
+function toolHoldMessage(kind, language, agentGender) {
+  const lang  = language === 'hinglish' ? 'hi' : language
+  const lines = TOOL_HOLD_LINES[lang] || TOOL_HOLD_LINES.en
+  const key   = kind === 'book' && agentGender === 'male' ? 'bookM' : kind
+  return [{ type: 'request-start', content: lines[key] }]
+}
+
+function getVapiFunctions(callType, language = 'en', agentGender = 'female') {
   const serverUrl    = process.env.BASE_URL + '/api/webhooks/vapi'
   const serverSecret = process.env.VAPI_WEBHOOK_SECRET
 
@@ -293,6 +312,7 @@ function getVapiFunctions(callType) {
           required: ['prospect_name', 'preferred_slot']
         }
       },
+      messages: toolHoldMessage('book', language, agentGender),
       server: { url: serverUrl, secret: serverSecret }
     },
     {
@@ -309,6 +329,7 @@ function getVapiFunctions(callType) {
           required: ['callback_time']
         }
       },
+      messages: toolHoldMessage('cb', language, agentGender),
       server: { url: serverUrl, secret: serverSecret }
     },
     {

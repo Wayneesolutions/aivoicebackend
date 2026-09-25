@@ -115,7 +115,7 @@ function buildModelConfig({ systemPrompt, language, agentGender, callType }) {
     provider: 'openai',
     model: LLM_MODEL,
     systemPrompt: buildGenderInstruction(language, agentGender) + buildLanguageInstruction(language) + (systemPrompt || ''),
-    tools: getVapiFunctions(callType),
+    tools: getVapiFunctions(callType, language, agentGender),
     temperature: LLM_TEMPERATURE,
     maxTokens: LLM_MAX_TOKENS,
   }
@@ -187,6 +187,9 @@ function isExplicitVoice(voiceId) {
 // Lower stability = more expressive / less monotone delivery. 0.5 sounded flat on
 // Hindi (Sep 25 review). Tunable per deploy without a code change.
 const ELEVENLABS_STABILITY = Number(process.env.ELEVENLABS_STABILITY || 0.4)
+// Slightly faster than default — Hindi replies were running 10–12s (Sep 25 test).
+// ElevenLabs accepts 0.7–1.2.
+const ELEVENLABS_SPEED = Number(process.env.ELEVENLABS_SPEED || 1.05)
 
 function buildElevenLabsVoice(voiceId) {
   return {
@@ -194,6 +197,7 @@ function buildElevenLabsVoice(voiceId) {
     voiceId,
     model: 'eleven_flash_v2_5', // multilingual — supports Hindi
     stability: ELEVENLABS_STABILITY,
+    speed: ELEVENLABS_SPEED,
     similarityBoost: 0.75,
     useSpeakerBoost: true,
   }
