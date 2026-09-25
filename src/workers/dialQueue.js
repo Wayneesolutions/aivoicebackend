@@ -363,6 +363,7 @@ async function dialLead(job) {
   let scriptLanguage = 'en'
   let scriptGender   = 'female'
   let scriptVoiceId  = null
+  let scriptCallType = 'sales'
   let systemPromptOverride  = null
   let firstMessageOverride  = null
   try {
@@ -377,11 +378,10 @@ async function dialLead(job) {
     scriptLanguage = script?.language   || 'en'
     scriptGender   = script?.agentGender || 'female'
     scriptVoiceId  = script?.voiceId     || null
+    scriptCallType = script?.callType    || 'sales'
 
     // Always build firstMessage fresh — picks up callerOrg, agentName, gender, language changes
-    if (script?.callType === 'survey') {
-      firstMessageOverride = scriptService.buildSurveyFirstMessage(script)
-    }
+    if (script) firstMessageOverride = scriptService.buildFirstMessage(script)
 
     // Compile system prompt fresh from current script.js templates
     const basePrompt = script ? scriptService.compileSystemPrompt(script) : ''
@@ -423,6 +423,7 @@ async function dialLead(job) {
       firstMessageOverride,
       language: scriptLanguage,
       agentGender: scriptGender,
+      callType: scriptCallType,
       metadata: { tenantId, leadId, campaignId, callRecordId: callRecord.id, leadName, leadCompany, leadTitle }
     })
   } catch (err) {
