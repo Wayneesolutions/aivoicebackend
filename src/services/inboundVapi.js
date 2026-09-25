@@ -62,20 +62,31 @@ function buildVapiAssistantPayload(assistant) {
       provider: 'openai',
       model: 'gpt-4o-mini',
       systemPrompt: sysPrompt,
-      temperature: 0.7,
+      temperature: 0.5,   // 0.7 wandered off-script; matches outbound
       maxTokens: 150,
     },
     voice: {
       provider: '11labs',
       voiceId,
       model: 'eleven_flash_v2_5',
+      stability: Number(process.env.ELEVENLABS_STABILITY || 0.4),
+      similarityBoost: 0.75,
     },
     transcriber: {
       provider: 'deepgram',
       model: 'nova-3',
       language: DEEPGRAM_LANG[lang] || 'en',
-      smartFormat: true,
+      // smartFormat punctuation causes early cut-ins for Hindi/Punjabi (same fix as outbound)
+      smartFormat: lang === 'en',
+      endpointing: lang === 'en' ? 200 : 250,
     },
+    // Turn-taking — same tuning as outbound (vapi.js). Inbound had none, so it
+    // used Vapi defaults: slower replies and easier accidental interruptions.
+    startSpeakingPlan: lang === 'en'
+      ? { waitSeconds: 0.2, smartEndpointingPlan: { provider: 'livekit', waitFunction: '2000 / (1 + exp(-10 * (x - 0.5)))' } }
+      : { waitSeconds: 0.1, transcriptionEndpointingPlan: { onPunctuationSeconds: 0.1, onNoPunctuationSeconds: 0.45, onNumberSeconds: 0.2 } },
+    stopSpeakingPlan: { numWords: 2, voiceSeconds: 0.5, backoffSeconds: 1.0 },
+    backgroundDenoisingEnabled: true,
     maxDurationSeconds: maxDuration,
     recordingEnabled: true,
     silenceTimeoutSeconds: 30,

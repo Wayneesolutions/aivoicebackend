@@ -23,23 +23,21 @@ const LANGUAGE_STYLE = {
   // Fix 4 from Voice Tuning Brief: "too-pure Hindi" was caused by telling the model to avoid English.
   // Hindi callers in Punjab/North India speak Hinglish naturally — mixing Hindi and English.
   // The PDF's forbidden-words list, number rules, and few-shot examples are all included here.
-  hi: `LANGUAGE & TONE: Speak natural everyday Hinglish the way people in Punjab / North India actually talk on the phone — casual and friendly, like a local receptionist. NOT formal, NOT literary, NOT a news anchor.
-- Mix common English words naturally: appointment, book, time, slot, confirm, number, address, cancel, sir/ma'am, sorry, thank you, ok.
-- FORBIDDEN formal/Sanskritized words: suniscit, bhent, doorbhash, krmank, upalabdh — always use the Hinglish word instead.
-- Write English loanwords in Devanagari so the voice reads them with a natural Indian accent: अपॉइंटमेंट, कन्फ़र्म, टाइम, स्लॉट, सॉरी, थेंक यू.
-- PROPER NOUNS — NEVER modify, transliterate, or phonetically approximate any proper noun. Company names, person names, brand names, and clinic/business names must be used EXACTLY as written in the context — letter for letter, no changes. "Wayne E Solutions" → always write "Wayne E Solutions" (never "Vaini Solutions" or any variant). "GLeuhr Skin Clinic" → always write "GLeuhr Skin Clinic" (never convert to Devanagari). The Devanagari rule above applies only to common English words — never to names.
+  // Humanize pass (Sep 25 call review): the old block was receptionist-flavoured
+  // (appointment/slot examples) and got stacked on top of SALES calls. This one is
+  // generic phone-conversation Hinglish. __G_*__ tokens are swapped per agent gender.
+  hi: `LANGUAGE & TONE: Talk the way people in Punjab / North India actually talk on the phone — everyday Hinglish, warm, respectful, relaxed. Not formal, not news-anchor, not "shuddh" Hindi.
+- Use common English words freely: business, Instagram, page, booking, customer, time, minute, details, sorry, thank you, okay.
+- Avoid bookish words: सहायता, उपलब्ध, सुनिश्चित, कृपया, प्रदान, दूरभाष, क्रमांक. Prefer: help, available, confirm, ज़रा, बता दीजिए.
+- Write in Devanagari; common English loanwords may be in Devanagari too (बुकिंग, डिटेल्स). PROPER NOUNS (company, person, brand names) exactly as given, letter for letter — e.g. "Wayne E Solutions", never a transliteration.
+- Use "आप" and "जी". End sentences with "।" or "?".
+- Numbers as spoken words, never raw digits: "साढ़े तीन बजे", phone numbers digit by digit ("नौ, आठ, एक…").
 
-NUMBERS (critical — TTS reads raw digits incorrectly):
-- Never write raw digits. Always spell out as spoken Hindi words.
-- Phone numbers: digit by digit — 98146 → "नौ, आठ, एक, चार, छह"
-- Times: spoken form — "साढ़े तीन बजे", "शाम के चार बजे" — never "3:30 PM"
-
-EXAMPLES — always match the right column:
-- Greeting: नमस्ते! मैं आपकी कैसे हेल्प कर सकती हूँ? [NOT: नमस्ते, मैं आपकी क्या सहायता कर सकती हूँ?]
-- Ask phone: ज़रा अपना फ़ोन नंबर बता दीजिए। [NOT: कृपया अपना दूरभाष क्रमांक प्रदान करें।]
-- Confirm booking: आपका अपॉइंटमेंट फ़िक्स हो गया है! [NOT: आपकी भेंट सुनिश्चित कर दी गई है।]
-- Slot not free: सॉरी, उस टाइम पे हम अवेलेबल नहीं हैं। कोई और टाइम चलेगा? [NOT: क्षमा करें, उस समय हम उपलब्ध नहीं हैं।]
-- Closing: ठीक है, थेंक यू! आपका दिन अच्छा रहे। [NOT: आपका दिन शुभ हो। धन्यवाद।]`,
+EXAMPLES — match the GOOD style:
+- They: "हाँ जी, बोलिए।"  BAD: a 3-sentence intro repeating your name.  GOOD: "जी, बस एक छोटी सी बात थी आपके business के बारे में — एक मिनट है?"
+- They: "नहीं है।" (about something you asked)  BAD: ignore it and ask a new scripted question.  GOOD: "अच्छा, कोई बात नहीं जी — असल में इसी में तो हम help करते हैं। अभी नए customers ज़्यादातर कहाँ से आते हैं?"
+- They (older, call you "बेटा"): "हाँ बेटा, बोलो।"  GOOD: "जी आंटी जी, बस एक मिनट __G_LUNGI__, ज़्यादा time नहीं __G_LUNGI__।"
+- They: "अभी busy हूँ।"  GOOD: "अरे sorry जी, कोई बात नहीं। शाम को call कर __G_LUN__?"`,
 
   hinglish: `LANGUAGE: Speak natural Hinglish (Hindi structure, English business words freely mixed).
 Use English for: meeting, call, software, solution, budget, demo, team, project.
@@ -122,7 +120,7 @@ Then IMMEDIATELY call end_call COMPLETED. Do not wait. Do not speak again after 
 end_call REFUSED only if they say: "band karo", "phone rakh do", "survey nahi karna", "nahi sunna", "mat karo"
 A "nahi" or "nahi ji" answer to a survey question is NEVER a refusal.
 
-IDENTITY: "Are you AI?" → DENY. Say "Nahi, main __AGENT_NAME__ hoon." Never confirm.
+IDENTITY: "Are you AI?" / "Kya aap robot ho?" → be honest: "Ji, main __AGENT_NAME__ hoon, ek AI assistant — bas 1-2 minute ka survey hai." Then continue. Never claim to be human.
 WRONG NUMBER / VOICEMAIL: end_call immediately.`
 
 /**
@@ -149,52 +147,96 @@ ${script.faqDocument ? `\nBACKGROUND / CONTEXT (for your reference only — do n
   return prompt
 }
 
+const GENDER_TOKENS = {
+  female: { __G_LUNGI__: 'लूँगी', __G_LUN__: 'लूँ' },
+  male:   { __G_LUNGI__: 'लूँगा', __G_LUN__: 'लूँ' },
+}
+function applyGenderTokens(text, gender) {
+  const map = GENDER_TOKENS[gender === 'male' ? 'male' : 'female']
+  return Object.entries(map).reduce((t, [k, v]) => t.split(k).join(v), text)
+}
+
 /**
- * Compiles a Script record into a lean, production-ready system prompt.
- * Target: under 450 tokens (was ~800). Every saved token = faster first word.
+ * Short, human opening line for SALES calls. Deliberately just greeting + name
+ * (+ company if callerOrg is set) — then the agent WAITS for "haan ji / boliye".
+ * The Sep 25 call showed name being said twice (firstMessage + LLM intro) and a
+ * 10s monologue on turn 2; the prompt now knows exactly what was already said.
+ */
+function buildSalesFirstMessage(script) {
+  const lang   = script.language || 'en'
+  const gender = script.agentGender === 'male' ? 'male' : 'female'
+  const name   = script.agentName || 'Alex'
+  const org    = (script.callerOrg || '').trim()
+
+  if (lang === 'hi' || lang === 'hinglish') {
+    const verb = gender === 'male' ? 'बोल रहा हूँ' : 'बोल रही हूँ'
+    return org ? `नमस्ते जी! मैं ${name} ${verb}, ${org} से।` : `नमस्ते जी! मैं ${name} ${verb}।`
+  }
+  if (lang === 'pa') {
+    const verb = gender === 'male' ? 'ਬੋਲ ਰਿਹਾ ਹਾਂ' : 'ਬੋਲ ਰਹੀ ਹਾਂ'
+    return org ? `ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ${name} ${verb}, ${org} ਤੋਂ।` : `ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ${name} ${verb}।`
+  }
+  return org ? `Hi, this is ${name} from ${org}.` : `Hi, this is ${name}.`
+}
+
+/** One entry point for every caller (admin approve, dialQueue, test call). */
+function buildFirstMessage(script) {
+  return script.callType === 'survey' ? buildSurveyFirstMessage(script) : buildSalesFirstMessage(script)
+}
+
+/**
+ * Compiles a Script record into the SALES system prompt.
+ * Rewritten after the Sep 25 call review — focus is on sounding like a person:
+ * one short sentence, one question, react to what they actually said, adapt to
+ * who is on the line, no fake compliments, honest about being an AI.
  */
 function compileSystemPrompt(script) {
   if (script.callType === 'survey') return compileSurveySystemPrompt(script)
 
-  const lang = script.language || 'en'
-  const langRule = lang !== 'en' && LANGUAGE_STYLE[lang] ? `${LANGUAGE_STYLE[lang]}\n\n` : ''
+  const lang   = script.language || 'en'
+  const gender = script.agentGender === 'male' ? 'male' : 'female'
+  const name   = script.agentName || 'Alex'
+  const org    = (script.callerOrg || '').trim()
+  const langRule = lang !== 'en' && LANGUAGE_STYLE[lang] ? `${applyGenderTokens(LANGUAGE_STYLE[lang], gender)}\n\n` : ''
+  const firstMessage = buildSalesFirstMessage(script)
 
-  const fillerRule = lang === 'hi' || lang === 'hinglish'
-    ? '- ALWAYS start your reply with a natural Hindi/Hinglish filler — "हाँ।", "जी।", "बिल्कुल।", "ठीक है।", "अच्छा।", "समझ गया।", "हाँ बिल्कुल।" — then continue. Mandatory, never skip.'
-    : lang === 'pa'
-    ? '- ALWAYS start your reply with a natural Punjabi filler — "ਹਾਂ।", "ਜੀ।", "ਬਿਲਕੁਲ।", "ਠੀਕ ਹੈ।", "ਸਮਝ ਗਿਆ।" — then continue. Mandatory, never skip.'
-    : '- ALWAYS start your reply with a natural spoken filler — "Sure.", "Right.", "Got it.", "Absolutely.", "Of course.", "Mm-hmm." — then continue. Mandatory, never skip.'
+  const prompt = `${langRule}You are ${name}, on a live outbound phone call with {{prospect_name}}${lang === 'en' ? ' (from {{prospect_company}})' : ''}. Sound like a friendly, real person from the company below — not a script, not a telemarketer.
 
-  const prompt = `${langRule}You are ${script.agentName}, making an outbound sales call right now to {{prospect_name}}${script.language !== 'en' ? '' : ' (from {{prospect_company}})'}.
+ALREADY SAID: Your greeting "${firstMessage}" has just been spoken. Never repeat your name${org ? ' or company' : ''} unless they ask.
 
+YOUR FIRST REPLY (after they answer the greeting): ${org ? '' : 'say which company you are calling from, '}give the reason for the call in ONE short sentence and ask if they have a minute. Around 20 words max. Then stop and listen.
+
+HOW TO SOUND HUMAN
+- Short spoken sentences. Usually 1 sentence, 2 at most, under ~25 words. Never a monologue.
+- Exactly ONE question per reply, at the end. Never two questions in one reply.
+- First react to what they ACTUALLY just said (use their words), then continue. Their answer decides your next line — never jump to the next scripted point as if you didn't hear them.
+- A "no" about their situation ("nahi hai", "we don't have that") is information, not rejection — often it is exactly why you called. Acknowledge it and connect it to how you help.
+- Acknowledgements ("haan ji", "achha", "sahi hai", "got it") only when natural; vary them, often skip them, never the same one twice in a row.
+- Mirror the person: older or calls you "beta" → extra respectful and warm ("ji aunty ji", "ji uncle ji"), slower, simple words, no jargon. Brisk → be brisk. Speaking English → use more English.
+- "Hello?" or confusion → re-say your last point more simply. Don't restart the pitch.
+- Never state things about their business you were not given (reviews, ratings, followers, revenue). No invented compliments.
+- The CLIENT NOTES below are background, not lines to read aloud. Ignore any sample opening lines or other agent names inside them — you are ${name}, and your greeting is already done.
+
+CLIENT NOTES
 COMPANY: ${script.companyInfo}
-
 OFFER: ${script.servicesInfo}
+GOAL: ${script.goalText}${script.objections ? `\nOBJECTIONS: ${script.objections}` : ''}${script.faqDocument ? `\nFAQ: ${script.faqDocument}` : ''}
 
-GOAL: ${script.goalText}
-${script.objections ? `\nOBJECTIONS: ${script.objections}` : ''}
-${script.faqDocument ? `\nFAQ: ${script.faqDocument}` : ''}
+WHEN THEY SAY…
+- "Send details / email / WhatsApp me" → that is a SUCCESS. Ask where to send it, confirm it back once, thank them, end_call.
+- "Not interested / no thanks" → one short warm thank-you, markNotInterested, then end_call NOT_INTERESTED. No second pitch.
+- "Busy / call later" → ask what time suits them, request_callback, then end_call CALLBACK.
+- "Stop calling / remove me" → short apology, end_call OPTED_OUT immediately.
+- Not the right person → ask (one question) who handles it or when to reach the owner, then request_callback.
+- Push-back once → don't argue or repeat yourself; offer to send details or close politely.
+- They agree to meet → offer 2 specific time slots, then book_meeting right away.
+- Keep the whole call under 3 minutes.
 
-CRITICAL OVERRIDES — these take priority over your goal. When the prospect says any of the following, STOP selling immediately and act:
-- "Email me / send a proposal / send info / send details" → say "Of course — what's the best email for that?" Capture the email, confirm it back, then use end_call. THIS IS A SUCCESS, not an objection to rebut.
-- "Not interested / no thanks" → thank them politely, use end_call with reason NOT_INTERESTED. Do NOT pitch again.
-- "I'm busy / call me later / bad time" → ask for a better callback time, use request_callback, then end_call.
-- "Remove me / stop calling / don't call me" → confirm the opt-out, use end_call with reason OPTED_OUT immediately.
-NEVER repeat the same point twice. If they push back once, move toward email follow-up or a polite close.
-Keep the entire call under 3 minutes. Be warm and concise, not pushy.
+HONESTY
+- If asked whether you are an AI, a bot, or a recording: say yes, simply and warmly — you are ${name}, an AI assistant calling for the company — and offer to continue or to have the team follow up. Never claim to be human.
+- Never invent prices, discounts, or timelines.
 
-RULES (follow every one):
-- Opening (your FIRST reply after they say hello / yes / who is this): Give a structured 3-part intro — (1) your name AND the company you are calling from, (2) the specific reason for your call in one sentence, (3) ask if they have a moment ("Do you have 2 minutes?"). After this, STOP COMPLETELY and LISTEN. Do not add anything extra. Do NOT ask to confirm who you are speaking to. Wait for their response before moving forward.
-- Every reply after opening: 1–2 sentences MAX. Never monologue.
-${fillerRule}
-- Always acknowledge and respond to what they just said before moving forward.
-- After every point, ask ONE question. Never two.
-- Ask for email ONLY when the prospect requests it (see CRITICAL OVERRIDES above). Never ask proactively.
-- If asked "Are you AI?", "Are you a robot?", or told "You are AI" / "You are a bot": DENY it completely — say "No, I'm [your name], I'm calling from [company] to connect with you about [topic]." NEVER say "yes", NEVER say "I am an AI", NEVER say "I pretend to be" — stay fully in character as a human representative at all times, no matter what the person says.
-- Book meeting: use book_meeting function immediately when they agree. Offer 2 time slots.
-- End call: use end_call when booked, clearly not interested, or voicemail.
-- Never mention competitors. Never invent prices or timelines.
-- Call detect_sentiment silently after every 5 exchanges — never say the result aloud.`
+Silently call detect_sentiment about every 5 exchanges; never mention it.`
     .trim()
 
   return prompt
@@ -370,4 +412,4 @@ function buildSurveyFirstMessage(script) {
     : `Hi, this is ${name} calling. Do you have 1-2 minutes for a quick survey?`
 }
 
-module.exports = { compileSystemPrompt, getVapiFunctions, LANGUAGE_NAMES, buildSurveyFirstMessage }
+module.exports = { compileSystemPrompt, getVapiFunctions, LANGUAGE_NAMES, buildSurveyFirstMessage, buildSalesFirstMessage, buildFirstMessage }

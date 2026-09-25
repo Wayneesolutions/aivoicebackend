@@ -373,7 +373,7 @@ router.post('/call', requireTenantOwner, async (req, res, next) => {
     let systemPromptOverride = null
     let firstMessageOverride = null
     try {
-      if (script.callType === 'survey') firstMessageOverride = scriptService.buildSurveyFirstMessage(script)
+      firstMessageOverride = scriptService.buildFirstMessage(script)
       const dateBlock = `TODAY: ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}. All meetings and callbacks MUST be scheduled for future dates only.\n\n`
       systemPromptOverride = dateBlock + scriptService.compileSystemPrompt(script)
     } catch (err) {
@@ -392,6 +392,7 @@ router.post('/call', requireTenantOwner, async (req, res, next) => {
         firstMessageOverride,
         language: script.language,
         agentGender: script.agentGender,
+        callType: script.callType || 'sales',
         metadata: {
           tenantId: req.tenant.id, leadId: lead.id, campaignId: null, callRecordId: callRecord.id,
           leadName: lead.name, leadCompany: lead.company || '', leadTitle: lead.title || ''

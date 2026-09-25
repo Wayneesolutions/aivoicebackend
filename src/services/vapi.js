@@ -92,12 +92,33 @@ function buildGenderInstruction(language, gender) {
 
 function buildLanguageInstruction(language) {
   if (language === 'hi') {
-    return 'LANGUAGE RULE: You must respond ONLY in Hindi throughout the entire call. Never mix in Punjabi words or phrases. Hinglish (Hindi + occasional English technical terms) is acceptable, but Punjabi is strictly forbidden.\n\n'
+    return 'LANGUAGE RULE: Speak Hindi / everyday Hinglish (Hindi mixed with common English words). Never use Punjabi words. If the person speaks mostly English, lean more English.\n\n'
   }
   if (language === 'pa') {
     return 'LANGUAGE RULE: You must respond ONLY in Punjabi throughout the entire call. Never mix in Hindi words or phrases. Use natural conversational Punjabi only.\n\n'
   }
   return ''
+}
+
+// ── LLM CONFIG ─────────────────────────────────────────────────────────
+// Single source of truth for the model block. Used by upsertAssistant AND by
+// the per-call override in startOutboundCall — previously the override only
+// sent {provider, model, systemPrompt}, dropping temperature/maxTokens/tools.
+// VAPI_LLM_MODEL lets you A/B e.g. gpt-4.1 / gpt-4o vs gpt-4o-mini on Hindi
+// naturalness without a deploy of code.
+const LLM_MODEL       = process.env.VAPI_LLM_MODEL || 'gpt-4o-mini'
+const LLM_TEMPERATURE = Number(process.env.VAPI_LLM_TEMPERATURE || 0.5)
+const LLM_MAX_TOKENS  = Number(process.env.VAPI_LLM_MAX_TOKENS || 200) // replies are 1–2 short sentences now
+
+function buildModelConfig({ systemPrompt, language, agentGender, callType }) {
+  return {
+    provider: 'openai',
+    model: LLM_MODEL,
+    systemPrompt: buildGenderInstruction(language, agentGender) + buildLanguageInstruction(language) + (systemPrompt || ''),
+    tools: getVapiFunctions(callType),
+    temperature: LLM_TEMPERATURE,
+    maxTokens: LLM_MAX_TOKENS,
+  }
 }
 
 const vapiClient = axios.create({
@@ -163,12 +184,16 @@ function isExplicitVoice(voiceId) {
     voiceId !== process.env.ELEVENLABS_DEFAULT_VOICE_ID
 }
 
+// Lower stability = more expressive / less monotone delivery. 0.5 sounded flat on
+// Hindi (Sep 25 review). Tunable per deploy without a code change.
+const ELEVENLABS_STABILITY = Number(process.env.ELEVENLABS_STABILITY || 0.4)
+
 function buildElevenLabsVoice(voiceId) {
   return {
     provider: '11labs',
     voiceId,
     model: 'eleven_flash_v2_5', // multilingual — supports Hindi
-    stability: 0.5,
+    stability: ELEVENLABS_STABILITY,
     similarityBoost: 0.75,
     useSpeakerBoost: true,
   }
@@ -279,19 +304,9 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
     ? voiceId
     : process.env.ELEVENLABS_DEFAULT_VOICE_ID
 
-  const genderInstruction   = buildGenderInstruction(language, agentGender)
-  const languageInstruction = buildLanguageInstruction(language)
-
   const payload = {
     name,
-    model: {
-      provider: 'openai',
-      model: 'gpt-4o-mini',
-      systemPrompt: genderInstruction + languageInstruction + (systemPrompt || ''),
-      tools: getVapiFunctions(callType),
-      temperature: 0.4,
-      maxTokens: 250,
-    },
+    model: buildModelConfig({ systemPrompt, language, agentGender, callType }),
     // Hindi/Punjabi → Cartesia (when CARTESIA_TTS_ENABLED=true), everything else → ElevenLabs.
     voice: buildVoiceConfig({ voiceId: resolvedVoiceId, language, agentGender }),
     transcriber: {
@@ -373,7 +388,7 @@ async function upsertAssistant({ name, systemPrompt, voiceId, agentName, languag
 /**
  * Trigger an outbound call via Vapi.
  */
-async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId, scriptVoiceId, systemPromptOverride, firstMessageOverride, language, agentGender }) {
+async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, metadata, voiceOverrideId, scriptVoiceId, systemPromptOverride, firstMessageOverride, language, agentGender, callType }) {
   if (!vapiNumberId) throw new Error('vapiNumberId is required for outbound calls')
 
   const assistantOverrides = {
@@ -396,9 +411,8 @@ async function startOutboundCall({ toNumber, vapiNumberId, vapiAssistantId, meta
   }
 
   if (systemPromptOverride) {
-    const genderInstruction   = buildGenderInstruction(language, agentGender)
-    const languageInstruction = buildLanguageInstruction(language)
-    assistantOverrides.model = { provider: 'openai', model: 'gpt-4o-mini', systemPrompt: genderInstruction + languageInstruction + systemPromptOverride }
+    // Full model block — keeps tools, temperature and maxTokens on the live call.
+    assistantOverrides.model = buildModelConfig({ systemPrompt: systemPromptOverride, language, agentGender, callType })
   }
 
   if (firstMessageOverride) {
