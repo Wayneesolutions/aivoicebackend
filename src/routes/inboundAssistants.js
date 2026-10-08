@@ -38,7 +38,7 @@ router.post('/', requireTenantUser, async (req, res, next) => {
       businessHours, transferNumber, transferMessage, bookingUrl, maxCallDuration
     } = req.body;
 
-    const firstMessage = scriptService.buildFirstMessage({ agentName, language, agentGender, businessName });
+    const firstMessage = scriptService.buildFirstMessage({ agentName, language, agentGender, businessName, businessType });
     const systemPrompt = scriptService.buildSystemPrompt({
       agentName, businessName, businessType, servicesInfo, faqText,
       businessHours, transferNumber, bookingUrl, language,
@@ -81,6 +81,7 @@ router.patch('/:id', requireTenantUser, async (req, res, next) => {
     const firstMessage = scriptService.buildFirstMessage({
       agentName: merged.agentName, language: merged.language,
       agentGender: merged.agentGender, businessName: merged.businessName,
+      businessType: merged.businessType,
     });
     const systemPrompt = scriptService.buildSystemPrompt({
       agentName: merged.agentName, businessName: merged.businessName,

@@ -976,7 +976,7 @@ router.post('/vapi-inbound', async (req, res) => {
       case 'end-of-call-report': {
         const report      = event;
         const vapiCallId  = report.call?.id || report.callId;
-        const transcript  = report.artifact?.transcript || report.transcript || [];
+        const transcript  = inboundSummary.normalizeTranscript(report);
         const recordingUrl = report.artifact?.recordingUrl || report.recordingUrl || null;
         const costUsd     = report.cost || null;
 
